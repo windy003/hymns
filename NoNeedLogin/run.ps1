@@ -1,1 +1,0 @@
-&  pythonw "D:\files\using\Web\hymns\NoNeedLogin\app.py"
