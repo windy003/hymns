@@ -1,1 +1,1 @@
-start /b ""  "D:\files\using\Web\hymns\NeedLogin\.venv\Scripts\pythonw.exe" pythonw "D:\files\using\Web\hymns\NeedLogin\app.py"
+start /b ""  "D:\files\using\Web\hymns\NeedLogin\.venv\Scripts\pythonw.exe" "D:\files\using\Web\hymns\NeedLogin\app.py"
