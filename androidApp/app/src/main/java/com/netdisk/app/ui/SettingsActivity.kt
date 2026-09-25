@@ -95,6 +95,11 @@ class SettingsActivity : AppCompatActivity() {
         android.util.Log.d("SettingsActivity", "lastSuccessfulUrl: $lastSuccessfulUrl")
         android.util.Log.d("SettingsActivity", "getServerUrl(): $serverUrl")
 
+        // 首次启动、尚未配置过服务器时，输入框保持为空
+        if (!preferencesManager.hasConfigured() && lastSuccessfulUrl.isNullOrEmpty()) {
+            return
+        }
+
         // 如果是完整URL（包含http://或https://），直接显示
         if (serverUrl.startsWith("http://") || serverUrl.startsWith("https://")) {
             serverUrlInput.setText(serverUrl)
