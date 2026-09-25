@@ -640,9 +640,9 @@
 
         {% if not current_path %}
             <div class="apk-notice">
-                如果要在手机上后台播放(黑屏播放),请下载app后使用,下载文件后,把文件后缀改为.apk,安装使用就可以了
-                <a href="https://jdbendi.oss-cn-hangzhou.aliyuncs.com/hymns/app-debug.bin" target="_blank" rel="noopener noreferrer">点我下载</a>
-                版本:2026/8/10-1,请尽量使用最新版本.
+                如果要在手机上后台播放(黑屏播放),请下载app后使用
+                <a href="{{ url_for('download_apk') }}" target="_blank" rel="noopener noreferrer">点我下载</a>
+                版本:2026/9/25-1,请尽量使用最新版本.
             </div>
         {% endif %}
 

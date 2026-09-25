@@ -693,6 +693,18 @@ def download(filepath):
     return send_file(file_path, as_attachment=True)
 
 
+APK_FILE = Path(__file__).resolve().parent.parent / 'androidApp' / 'app' / 'build' / 'outputs' / 'apk' / 'debug' / 'app-debug.apk'
+
+
+@app.route('/app-debug.apk')
+def download_apk():
+    """下载安卓 App 安装包（无需登录）"""
+    if not APK_FILE.is_file():
+        abort(404)
+    return send_file(APK_FILE, as_attachment=True, download_name='app-debug.apk',
+                     mimetype='application/vnd.android.package-archive')
+
+
 if __name__ == '__main__':
     if USE_OSS:
         print(f"共享目录来自阿里云 OSS: bucket={OSS_CONFIG['bucket']}, endpoint={OSS_CONFIG['endpoint']}, prefix={OSS_CONFIG['prefix']}")
