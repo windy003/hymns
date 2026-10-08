@@ -1,0 +1,1 @@
+cp hymn-NNL.service /etc/systemd/system/hymn-NNL.service

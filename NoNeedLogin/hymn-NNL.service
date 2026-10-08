@@ -1,0 +1,19 @@
+[Unit]
+Description=Hymns NoLogin Website
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Replace with the Linux account that owns this project directory.
+User=root
+# Replace /path/to/hymns with the actual Linux deployment directory.
+WorkingDirectory=/root/hymns/NoNeedLogin
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/hymns/NoNeedLogin/.venv/bin/python /path/to/hymns/NoNeedLogin/app.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=Hymns NeedLogin Website
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Replace with the Linux account that owns this project directory.
+User=root
+# Replace /path/to/hymns with the actual Linux deployment directory.
+WorkingDirectory=/root/hymns/NeedLogin
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/hymns/NeedLogin/.venv/bin/python /path/to/hymns/NeedLogin/app.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
