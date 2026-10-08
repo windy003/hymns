@@ -1,0 +1,1 @@
+"D:\files\using\Web\hymns\NoNeedLogin\.venv\Scripts\python.exe" "D:\files\using\Web\hymns\NoNeedLogin\app.py"
