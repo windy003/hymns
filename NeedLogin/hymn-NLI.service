@@ -10,7 +10,7 @@ User=root
 # Replace /path/to/hymns with the actual Linux deployment directory.
 WorkingDirectory=/root/hymns/NeedLogin
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/root/hymns/NeedLogin/.venv/bin/python /path/to/hymns/NeedLogin/app.py
+ExecStart=/root/hymns/NeedLogin/.venv/bin/python /root/hymns/NeedLogin/app.py
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
