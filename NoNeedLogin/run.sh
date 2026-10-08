@@ -1,1 +1,1 @@
-"D:/files/using/Web/hymns/NoNeedLogin/.venv/Scripts/python.exe" "D:/files/using/Web/hymns/NoNeedLogin/app.py"
+"/root/hymns/NoNeedLogin/.venv/bin/python" "/root/hymns/NoNeedLogin/app.py"
