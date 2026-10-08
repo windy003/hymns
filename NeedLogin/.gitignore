@@ -3,4 +3,4 @@
 androidApp/app/build
 androidApp/.gradle
 androidApp/.idea
-users.db
+*.db

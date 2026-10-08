@@ -1,4 +1,4 @@
 .claude
 .env
 __pycache__
-views.db
+*.db

@@ -52,8 +52,43 @@ def init_views_db():
         )
     ''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_page_views_timestamp ON page_views (timestamp)')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS server_display_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            next_start_static INTEGER NOT NULL DEFAULT 0
+        )
+    ''')
     conn.commit()
     conn.close()
+
+
+def consume_next_start_mode():
+    """Return this startup's mode and persist the opposite mode for next startup."""
+    conn = sqlite3.connect(str(VIEWS_DB_PATH), timeout=30)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute(
+            'SELECT next_start_static FROM server_display_state WHERE id = 1'
+        ).fetchone()
+        if row is None:
+            # First startup defaults to playback mode; next startup shows static page.
+            active = False
+            conn.execute(
+                'INSERT INTO server_display_state (id, next_start_static) VALUES (1, 1)'
+            )
+        else:
+            active = bool(row[0])
+            conn.execute(
+                'UPDATE server_display_state SET next_start_static = ? WHERE id = 1',
+                (0 if active else 1,)
+            )
+        conn.commit()
+        return active
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def get_client_ip():
@@ -173,7 +208,7 @@ def lookup_ip_locations(ips):
 
 SWITCH_PAGE_PATH = Path(__file__).resolve().parent / 'index.html'
 
-AD_STATE = {'active': False}
+AD_STATE = {'active': consume_next_start_mode()}
 AD_MODE_ENDPOINTS = {'index', 'play', 'view', 'stream', 'download'}
 
 
@@ -192,10 +227,12 @@ def get_switch_wait_seconds(key, default):
 def switch_loop():
     """在“正常内容”和“广告页”之间定时切换"""
     while True:
-        AD_STATE['active'] = False
-        time.sleep(get_switch_wait_seconds('No_Need_Login_Page_Lasting', 600))
-        AD_STATE['active'] = True
-        time.sleep(get_switch_wait_seconds('Static_Page_Lasting', 180))
+        if AD_STATE['active']:
+            time.sleep(get_switch_wait_seconds('Static_Page_Lasting', 180))
+            AD_STATE['active'] = False
+        else:
+            time.sleep(get_switch_wait_seconds('No_Need_Login_Page_Lasting', 600))
+            AD_STATE['active'] = True
 
 
 if SWITCH_PAGE_PATH.exists():

@@ -2,3 +2,5 @@ Flask==3.0.0
 Werkzeug==3.0.1
 python-dotenv==1.0.0
 waitress==3.0.0
+alibabacloud_dypnsapi20170525>=2.0.0,<3.0.0
+oss2==2.18.5
