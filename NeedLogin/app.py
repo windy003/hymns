@@ -206,7 +206,7 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not session.get('logged_in'):
-            return redirect(url_for('login', next=request.url))
+            return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -216,7 +216,7 @@ def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not session.get('logged_in'):
-            return redirect(url_for('login', next=request.url))
+            return redirect(url_for('login'))
         if not session.get('is_admin'):
             abort(403)
         return f(*args, **kwargs)
@@ -527,7 +527,7 @@ def login():
                             ).fetchone()
                             if still_approved and still_approved['is_approved']:
                                 finish_login(db, f'sms_{phone}', False, 1)
-                                return redirect(request.args.get('next') or url_for('index'))
+                                return redirect(url_for('index'))
                             flash('此手机号的登录权限已停用', 'error')
                         else:
                             flash('短信验证码错误或已过期', 'error')
@@ -556,7 +556,7 @@ def login():
 
             if user and valid_password:
                 finish_login(db, username, user['is_admin'], user['max_devices'])
-                return redirect(request.args.get('next') or url_for('index'))
+                return redirect(url_for('index'))
             flash('用户名或密码错误', 'error')
 
     return render_template('login.html', active_method=active_method)
@@ -1059,4 +1059,20 @@ if __name__ == '__main__':
         app.run(host=CONFIG['HOST'], port=CONFIG['PORT'], debug=True)
     else:
         # 生产模式：waitress WSGI 服务器，多线程并发处理请求
-        serve(app, host=CONFIG['HOST'], port=CONFIG['PORT'], threads=8)
+        # 必须声明本机 Caddy 是可信代理，否则 waitress 默认会把 X-Forwarded-* 头
+        # 整个丢掉（clear_untrusted_proxy_headers 默认为 True），带来两个问题：
+        #   1. 拿不到真实访客 IP，request.remote_addr 恒为 127.0.0.1；
+        #   2. 拿不到 X-Forwarded-Proto，Flask 以为自己是 http，
+        #      于是 url_for / request.url 生成的地址都是 http:// 开头
+        #      （登录页跳转、静态资源、绝对 URL 都会受影响）。
+        # trusted_proxy_count=1 表示代理链上只有 Caddy 一跳，取 XFF 最后一段，
+        # 也就是 Caddy 追加的真实客户端 IP，客户端自己伪造的前几段不会被采信。
+        try:
+            serve(app, host=CONFIG['HOST'], port=CONFIG['PORT'], threads=8,
+                  trusted_proxy='127.0.0.1',
+                  trusted_proxy_count=1,
+                  trusted_proxy_headers={'x-forwarded-for', 'x-forwarded-proto'},
+                  clear_untrusted_proxy_headers=False)
+        except TypeError:
+            # waitress 1.x 不认识这些代理参数，退回原样启动
+            serve(app, host=CONFIG['HOST'], port=CONFIG['PORT'], threads=8)

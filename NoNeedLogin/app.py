@@ -471,7 +471,7 @@ def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if not session.get('is_admin'):
-            return redirect(url_for('admin_login', next=request.path))
+            return redirect(url_for('admin_login'))
         return f(*args, **kwargs)
     return decorated
 
@@ -483,10 +483,9 @@ def admin_login():
         password = request.form.get('password', '')
         if password == CONFIG['ADMIN_PASSWORD']:
             session['is_admin'] = True
-            next_url = request.form.get('next') or url_for('admin')
-            return redirect(next_url)
+            return redirect(url_for('admin'))
         flash('密码错误', 'error')
-    return render_template('admin_login.html', next=request.args.get('next', ''))
+    return render_template('admin_login.html')
 
 
 @app.route('/admin/logout')
