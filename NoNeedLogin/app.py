@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import ipaddress
 import sqlite3
 import time
 import threading
@@ -91,50 +92,38 @@ def consume_next_start_mode():
         conn.close()
 
 
-def _first_ip(header_value):
-    """从一个头值里取出第一个 IP（兼容 `1.2.3.4:5678`、`[2001:db8::1]:443`、带引号）"""
-    for part in header_value.split(','):
-        ip = part.strip().strip('"')
-        if not ip:
-            continue
-        if ip.startswith('['):        # [2001:db8::1]:443
-            ip = ip[1:].split(']')[0]
-        elif ip.count(':') == 1:      # 1.2.3.4:5678
-            ip = ip.split(':')[0]
-        if ip:
-            return ip
-    return None
+# 本机反向代理（Caddy）可能用 IPv4 或 IPv6 回环地址连过来
+LOOPBACK_PROXIES = {'127.0.0.1', '::1'}
 
 
 def get_client_ip():
     """获取真实客户端 IP。
 
-    本服务前面挂着 Caddy 反向代理（Caddy 后面可能还有 Cloudflare Tunnel 的
-    cloudflared 进程），所以 waitress 这一层看到的 remote_addr 永远是上一跳
-    代理的地址（通常是 127.0.0.1），真实 IP 只能从转发头里取：
+    链路是 Caddy(本机) -> waitress -> Flask。waitress 从 2.0 起默认会把
+    X-Forwarded-* 头整个丢掉（clear_untrusted_proxy_headers 默认为 True），
+    所以以前不管怎么读 XFF 都读不到，只能退回 127.0.0.1。
 
-    1. CF-Connecting-IP：Cloudflare 边缘节点写入，走了 Cloudflare 时最可靠；
-    2. X-Real-IP：由 Caddy 的 `header_up X-Real-IP {client_ip}` 写入，单值、干净；
-    3. X-Forwarded-For：逗号分隔的转发链，从左往右取第一个非内网地址。
-       注意 Caddy 默认会丢弃客户端传来的 X-Forwarded-For、改写成"上一跳"的地址，
-       所以在 cloudflared -> Caddy -> waitress 这种结构下它会退化成 127.0.0.1，
-       需要在 Caddy 里配置 trusted_proxies 才能拿到真实 IP（见项目说明）；
-    4. remote_addr：兜底，经过代理时通常就是 127.0.0.1。
+    现在启动时用 trusted_proxy='127.0.0.1' 声明信任本机代理（见文件末尾 serve），
+    waitress 会把 Caddy 追加在 X-Forwarded-For 末尾的真实客户端 IP 解析出来，
+    直接重写成 request.remote_addr —— 所以正常情况读 remote_addr 就是真实 IP。
+
+    不要再读 CF-Connecting-IP：站点已不走 Cloudflare，该头没人清理，
+    客户端可以随意伪造。
     """
-    for header in ('CF-Connecting-IP', 'True-Client-IP', 'X-Real-IP'):
-        ip = _first_ip(request.headers.get(header, ''))
-        if ip and not _is_private_ip(ip):
-            return ip
-
-    chain = [p.strip() for p in request.headers.get('X-Forwarded-For', '').split(',') if p.strip()]
-    for ip in chain:
-        if not _is_private_ip(ip):
-            return ip
-    if chain:
-        # 整条链都是内网地址：保留最后看到的地址，方便在 /admin 上看出是哪一跳
-        return chain[0]
-
-    return request.remote_addr
+    ip = (request.remote_addr or '').strip()
+    # 兜底：请求仍来自本机代理时（代理地址不是 127.0.0.1、trusted_proxy 没命中），
+    # 自己去读 X-Forwarded-For —— 只取最后一段，因为 Caddy 把真实 IP 追加在最右侧，
+    # 最左边是客户端可以随意伪造的，取它会往统计里灌假 IP。
+    if ip in LOOPBACK_PROXIES:
+        xff = request.headers.get('X-Forwarded-For', '')
+        if xff:
+            ip = xff.rsplit(',', 1)[-1].strip()
+    # 校验合法性，非法内容直接丢弃，避免垃圾数据进入统计
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return ''
+    return ip
 
 
 def record_view(path):
@@ -578,8 +567,12 @@ def admin_whoami():
     """排查用：显示服务器实际收到的转发头和解析出的客户端 IP。
 
     用手机流量（不要用 WiFi）打开 /admin/whoami，即可确认真实 IP 有没有传到。
-    如果这里 forward_headers 里只有 127.0.0.1，说明是 Caddy 那一层把真实 IP
-    替换掉了，需要在 Caddy 配置里加 trusted_proxies。
+
+    正常情况下 client_ip 和 remote_addr 都应该是真实公网 IP：
+    waitress 已在启动时声明信任本机 Caddy，会把 X-Forwarded-For 最后一段
+    （Caddy 追加的真实客户端 IP）解析进 remote_addr。
+    如果 forwarded_headers 是空的、remote_addr 又是 127.0.0.1，
+    说明启动参数没生效（服务没重启，或 waitress 版本太旧）。
     """
     forwarded = {
         k: v for k, v in request.headers.items()
@@ -830,4 +823,19 @@ if __name__ == '__main__':
         app.run(host=CONFIG['HOST'], port=CONFIG['PORT'], debug=True, threaded=True)
     else:
         # 生产模式：waitress WSGI 服务器，多线程并发处理请求
-        serve(app, host=CONFIG['HOST'], port=CONFIG['PORT'], threads=8)
+        # 必须告诉 waitress 本机 Caddy 是可信代理，否则它会把 X-Forwarded-For
+        # 整个丢掉，我们永远拿不到真实访客 IP（见 get_client_ip 注释）。
+        # trusted_proxy_count=1 表示代理链上只有 Caddy 一跳，解析时取 XFF 最后一段，
+        # 也就是 Caddy 追加的真实客户端 IP，客户端自己伪造的前几段不会被采信。
+        try:
+            serve(app, host=CONFIG['HOST'], port=CONFIG['PORT'], threads=8,
+                  trusted_proxy='127.0.0.1',
+                  trusted_proxy_count=1,
+                  trusted_proxy_headers={'x-forwarded-for'},
+                  # 保留 XFF 头本身不清理：万一代理回环地址不是 127.0.0.1（如走 ::1），
+                  # get_client_ip 里的兜底分支仍能取到
+                  clear_untrusted_proxy_headers=False)
+        except TypeError:
+            # waitress 1.x 不认识这些代理参数；它本来也不清理 X-Forwarded-For，
+            # get_client_ip 的兜底分支依然能拿到真实 IP，所以退回原样启动即可
+            serve(app, host=CONFIG['HOST'], port=CONFIG['PORT'], threads=8)
