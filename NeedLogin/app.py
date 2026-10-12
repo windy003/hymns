@@ -3,6 +3,9 @@ import sqlite3
 import secrets
 import re
 import json
+import time
+import ipaddress
+import urllib.request
 from pathlib import Path
 from functools import wraps
 from datetime import timedelta, datetime
@@ -96,6 +99,22 @@ def init_db():
         created_at TEXT NOT NULL,
         approved_at TEXT
     )''')
+
+    # 浏览量统计表（记录浏览动作的路径、来访 IP、登录名、时间戳）
+    db.execute('''CREATE TABLE IF NOT EXISTS page_views (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        path TEXT NOT NULL,
+        ip TEXT,
+        username TEXT DEFAULT '',
+        timestamp REAL NOT NULL
+    )''')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_page_views_timestamp ON page_views (timestamp)')
+
+    # 迁移：老库补 username 列（未登录的访问记为 ''，管理页显示"未登录"）
+    cursor = db.execute("PRAGMA table_info(page_views)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if 'username' not in columns:
+        db.execute("ALTER TABLE page_views ADD COLUMN username TEXT DEFAULT ''")
 
     # 确保管理员账号存在
     admin = db.execute('SELECT id FROM users WHERE username = ?',
@@ -808,6 +827,148 @@ def download(filepath):
     return send_file(file_path, as_attachment=True)
 
 
+# ============ 浏览量统计 ============
+
+# 需要计入浏览量的端点：只统计真正的内容浏览动作。
+# /admin、/static、/api、/login、/logout、/stream 都不计
+# （/stream 是媒体字节流，会被播放器反复请求，计入会严重虚高）。
+VIEW_TRACKED_ENDPOINTS = {'index', 'play', 'view', 'download'}
+
+# 本机反向代理（Caddy）可能用 IPv4 或 IPv6 回环地址连过来
+LOOPBACK_PROXIES = {'127.0.0.1', '::1'}
+
+
+def get_client_ip():
+    """获取真实访客 IP。
+
+    链路是 Caddy(本机) -> waitress -> Flask。启动时用 trusted_proxy='127.0.0.1'
+    声明信任本机代理（见文件末尾 serve），waitress 会把 Caddy 追加在
+    X-Forwarded-For 末尾的真实客户端 IP 解析出来，直接重写成 request.remote_addr，
+    所以正常情况读 remote_addr 就是真实 IP。
+
+    不要再读 CF-Connecting-IP：站点不走 Cloudflare，该头没人清理，可被随意伪造。
+    """
+    ip = (request.remote_addr or '').strip()
+    # 兜底：请求仍来自本机代理时（trusted_proxy 没命中），自己去读 XFF 最后一段，
+    # 因为 Caddy 把真实 IP 追加在最右侧，最左边是客户端可以随意伪造的。
+    if ip in LOOPBACK_PROXIES:
+        xff = request.headers.get('X-Forwarded-For', '')
+        if xff:
+            ip = xff.rsplit(',', 1)[-1].strip()
+    # 校验合法性，非法内容直接丢弃，避免垃圾数据进入统计
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return ''
+    return ip
+
+
+def record_view(path):
+    """记录一次浏览，并顺便清理 7 天前的旧记录。
+
+    未登录的访问也统计，只是 username 存空字符串，管理页显示成"未登录"。
+    """
+    now = time.time()
+    username = session.get('username') or ''
+    try:
+        db = get_db()
+        db.execute('INSERT INTO page_views (path, ip, username, timestamp) VALUES (?, ?, ?, ?)',
+                   (path, get_client_ip(), username, now))
+        db.execute('DELETE FROM page_views WHERE timestamp < ?', (now - 7 * 24 * 3600,))
+        db.commit()
+    except Exception:
+        pass
+
+
+@app.before_request
+def track_view():
+    """把内容浏览记进 page_views（登录与否都统计）"""
+    if request.method == 'GET' and request.endpoint in VIEW_TRACKED_ENDPOINTS:
+        record_view(request.path)
+
+
+# ============ IP 归属地查询 ============
+# 使用 ip-api.com 免费批量接口（无需 Key），结果做内存缓存，避免重复查询撞限流。
+
+_ip_location_cache = {}  # ip -> (location_str, cached_at)
+_IP_LOCATION_CACHE_TTL = 24 * 3600
+
+
+def _is_private_ip(ip):
+    """判断是否为内网/本地地址，这类地址无法查询归属地"""
+    if not ip:
+        return True
+    if ip in ('127.0.0.1', 'localhost', '::1'):
+        return True
+    parts = ip.split('.')
+    if len(parts) == 4:
+        try:
+            a, b = int(parts[0]), int(parts[1])
+        except ValueError:
+            return False
+        if a == 10 or a == 127:
+            return True
+        if a == 172 and 16 <= b <= 31:
+            return True
+        if a == 192 and b == 168:
+            return True
+    return False
+
+
+def lookup_ip_locations(ips):
+    """批量查询 IP 归属地（国家/省/市 + 运营商），返回 {ip: 归属地字符串}"""
+    result = {}
+    now = time.time()
+    to_query = []
+    for ip in ips:
+        if not ip or ip in result:
+            continue
+        if _is_private_ip(ip):
+            result[ip] = '内网/本地'
+            continue
+        cached = _ip_location_cache.get(ip)
+        if cached and now - cached[1] < _IP_LOCATION_CACHE_TTL:
+            result[ip] = cached[0]
+        else:
+            to_query.append(ip)
+
+    if to_query:
+        try:
+            payload = json.dumps([
+                {'query': ip, 'fields': 'status,country,regionName,city,isp,query'}
+                for ip in to_query[:100]
+            ]).encode('utf-8')
+            req = urllib.request.Request(
+                'http://ip-api.com/batch?lang=zh-CN',
+                data=payload,
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+            for item in data:
+                ip = item.get('query')
+                if not ip:
+                    continue
+                if item.get('status') == 'success':
+                    parts = [p for p in (item.get('country'), item.get('regionName'), item.get('city')) if p]
+                    dedup = []
+                    for p in parts:
+                        if not dedup or dedup[-1] != p:
+                            dedup.append(p)
+                    loc = ' '.join(dedup) or '未知'
+                    if item.get('isp'):
+                        loc = f"{loc} · {item['isp']}"
+                else:
+                    loc = '未知'
+                result[ip] = loc
+                _ip_location_cache[ip] = (loc, now)
+        except Exception:
+            for ip in to_query:
+                result.setdefault(ip, '查询失败')
+
+    return result
+
+
 # ============ 用户管理（仅管理员） ============
 
 @app.route('/admin')
@@ -830,8 +991,84 @@ def admin_users():
         row['phone']: get_active_session_count(db, f"sms_{row['phone']}")
         for row in phone_accounts
     }
+
+    # ---- 最近 24 小时浏览量统计 ----
+    now = time.time()
+    day_ago = now - 24 * 3600
+
+    total_24h = db.execute(
+        'SELECT COUNT(*) c FROM page_views WHERE timestamp >= ?', (day_ago,)
+    ).fetchone()['c']
+    unique_ip_24h = db.execute(
+        "SELECT COUNT(DISTINCT ip) c FROM page_views WHERE timestamp >= ? AND ip <> ''",
+        (day_ago,)
+    ).fetchone()['c']
+    total_all = db.execute('SELECT COUNT(*) c FROM page_views').fetchone()['c']
+
+    # 最近 24 小时，按小时统计浏览量
+    hourly = []
+    for i in range(23, -1, -1):
+        hour_start = now - (i + 1) * 3600
+        hour_end = now - i * 3600
+        c = db.execute(
+            'SELECT COUNT(*) c FROM page_views WHERE timestamp >= ? AND timestamp < ?',
+            (hour_start, hour_end)
+        ).fetchone()['c']
+        hourly.append({
+            'label': datetime.fromtimestamp(hour_end).strftime('%H:00'),
+            'count': c
+        })
+    max_hourly = max((h['count'] for h in hourly), default=0)
+
+    # 最近 24 小时出现过的独立 IP（按访问次数排序），供逐个点击查询归属地。
+    # 归属地不在这里批量查，避免一次刷新触发大量请求撞到 ip-api.com 的限流；
+    # 改为前端按需点击，见 /admin/ip_location 接口。
+    # 子查询取的是该 IP 最近一次访问用的登录名，空字符串显示为"未登录"。
+    unique_ips = [{
+        'ip': row['ip'],
+        'username': row['u'] or '未登录',
+        'count': row['c'],
+        'last_time': datetime.fromtimestamp(row['t']).strftime('%m-%d %H:%M:%S')
+    } for row in db.execute(
+        """SELECT p.ip,
+                  COUNT(*) c,
+                  MAX(p.timestamp) t,
+                  (SELECT username FROM page_views p2
+                   WHERE p2.ip = p.ip
+                   ORDER BY p2.timestamp DESC LIMIT 1) u
+           FROM page_views p
+           WHERE p.timestamp >= ? AND p.ip <> ''
+           GROUP BY p.ip
+           ORDER BY c DESC""",
+        (day_ago,)
+    ).fetchall()]
+
+    # 最近的明细访问记录（含登录名），逐条看谁在什么时间看了什么
+    recent_rows = db.execute(
+        'SELECT path, ip, username, timestamp FROM page_views ORDER BY timestamp DESC LIMIT 50'
+    ).fetchall()
+    recent_views = [{
+        'path': row['path'],
+        'ip': row['ip'],
+        'username': row['username'] or '未登录',
+        'time': datetime.fromtimestamp(row['timestamp']).strftime('%m-%d %H:%M:%S')
+    } for row in recent_rows]
+
     return render_template('admin_users.html', users=users, user_sessions=user_sessions,
-                           phone_accounts=phone_accounts, phone_sessions=phone_sessions)
+                           phone_accounts=phone_accounts, phone_sessions=phone_sessions,
+                           total_24h=total_24h, unique_ip_24h=unique_ip_24h,
+                           total_all=total_all, hourly=hourly, max_hourly=max_hourly,
+                           unique_ips=unique_ips, recent_views=recent_views)
+
+
+@app.route('/admin/ip_location')
+@admin_required
+def admin_ip_location():
+    """按需查询单个 IP 的归属地（管理页点击按钮时通过 AJAX 调用）"""
+    ip = request.args.get('ip', '').strip()
+    if not ip:
+        return {'location': ''}, 400
+    return {'location': lookup_ip_locations([ip]).get(ip, '未知')}
 
 
 @app.route('/admin/phone-accounts/add', methods=['POST'])

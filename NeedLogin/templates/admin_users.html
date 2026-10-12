@@ -422,6 +422,109 @@
                 padding: 12px;
             }
         }
+        /* ---- 最近 24 小时访问统计 ---- */
+        .stats-row {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .stat-box {
+            flex: 1;
+            min-width: 130px;
+            text-align: center;
+        }
+
+        .stat-box .value {
+            font-size: 28px;
+            font-weight: 700;
+            background: var(--accent-gradient);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+
+        .stat-box .label {
+            margin-top: 4px;
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .sub-block {
+            margin-top: 22px;
+        }
+
+        .sub-title {
+            font-size: 15px;
+            margin: 0 0 12px;
+            color: var(--text-secondary);
+        }
+
+        .chart {
+            display: flex;
+            align-items: flex-end;
+            gap: 3px;
+            height: 110px;
+            overflow-x: auto;
+            padding-bottom: 4px;
+        }
+
+        .bar-wrap {
+            flex: 1 0 18px;
+            min-width: 18px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-end;
+            height: 100%;
+        }
+
+        .bar {
+            width: 100%;
+            max-width: 20px;
+            background: var(--accent-gradient);
+            border-radius: 3px 3px 0 0;
+            min-height: 2px;
+        }
+
+        .bar-label {
+            font-size: 9px;
+            color: var(--text-muted);
+            margin-top: 6px;
+            writing-mode: vertical-rl;
+            text-orientation: mixed;
+        }
+
+        .table-wrap {
+            max-height: 420px;
+            overflow-y: auto;
+        }
+
+        .loc-btn {
+            padding: 3px 10px;
+            font-size: 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--hover-bg);
+            color: var(--text-secondary);
+            cursor: pointer;
+        }
+
+        .loc-btn:hover { background: var(--bg-primary); }
+        .loc-btn:disabled { cursor: default; opacity: 0.6; }
+
+        .loc-result {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-left: 6px;
+        }
+
+        .empty-tip {
+            color: var(--text-muted);
+            font-size: 14px;
+            padding: 16px 0;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
@@ -441,6 +544,107 @@
                 {% endfor %}
             {% endif %}
         {% endwith %}
+
+        <!-- 最近 24 小时访问统计 -->
+        <div class="card">
+            <h2>访问统计</h2>
+            <div class="stats-row">
+                <div class="stat-box">
+                    <div class="value">{{ total_24h }}</div>
+                    <div class="label">最近 24 小时浏览量</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ unique_ip_24h }}</div>
+                    <div class="label">最近 24 小时独立 IP 访问量</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ total_all }}</div>
+                    <div class="label">近 7 天累计浏览量</div>
+                </div>
+            </div>
+
+            <div class="sub-block">
+                <h3 class="sub-title">最近 24 小时逐时浏览量</h3>
+                <div class="chart">
+                    {% for h in hourly %}
+                    <div class="bar-wrap" title="{{ h.label }} - {{ h.count }} 次">
+                        <div class="bar" style="height: {{ (h.count / max_hourly * 100) if max_hourly > 0 else 0 }}%;"></div>
+                        <div class="bar-label">{{ h.label }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="sub-block">
+                <h3 class="sub-title">最近 24 小时独立 IP（{{ unique_ips|length }} 个）</h3>
+                {% if unique_ips %}
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>IP</th>
+                                <th>登录名</th>
+                                <th>访问次数</th>
+                                <th>最近访问</th>
+                                <th>归属地</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for u in unique_ips %}
+                            <tr>
+                                <td data-label="IP">{{ u.ip }}</td>
+                                <td data-label="登录名">{{ u.username }}</td>
+                                <td data-label="访问次数">{{ u.count }}</td>
+                                <td data-label="最近访问" class="text-muted">{{ u.last_time }}</td>
+                                <td data-label="归属地">
+                                    <button type="button" class="loc-btn" data-ip="{{ u.ip }}">查询</button>
+                                    <span class="loc-result"></span>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="empty-tip">最近 24 小时暂无访问记录</div>
+                {% endif %}
+            </div>
+
+            <div class="sub-block">
+                <h3 class="sub-title">最近访问记录（最多 50 条）</h3>
+                {% if recent_views %}
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>时间</th>
+                                <th>登录名</th>
+                                <th>路径</th>
+                                <th>IP</th>
+                                <th>归属地</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for v in recent_views %}
+                            <tr>
+                                <td data-label="时间" class="text-muted">{{ v.time }}</td>
+                                <td data-label="登录名">{{ v.username }}</td>
+                                <td data-label="路径">{{ v.path }}</td>
+                                <td data-label="IP">{{ v.ip }}</td>
+                                <td data-label="归属地">
+                                    <button type="button" class="loc-btn" data-ip="{{ v.ip }}">查询</button>
+                                    <span class="loc-result"></span>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="empty-tip">暂无访问记录</div>
+                {% endif %}
+            </div>
+        </div>
 
         <!-- 添加用户 -->
         <div class="card">
@@ -690,6 +894,26 @@
             if (e.key === 'Escape') {
                 document.querySelectorAll('.modal-overlay.active').forEach(m => m.classList.remove('active'));
             }
+        });
+
+        // 点击按钮查询 IP 归属地。
+        // 按需查询而不是开机就全查，避免一次刷新触发大量请求撞到 ip-api.com 的限流。
+        document.querySelectorAll('.loc-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var resultSpan = btn.nextElementSibling;
+                btn.disabled = true;
+                btn.textContent = '查询中...';
+                fetch('/admin/ip_location?ip=' + encodeURIComponent(btn.dataset.ip))
+                    .then(function (res) { return res.json(); })
+                    .then(function (data) {
+                        resultSpan.textContent = data.location || '未知';
+                        btn.remove();
+                    })
+                    .catch(function () {
+                        btn.disabled = false;
+                        btn.textContent = '重试';
+                    });
+            });
         });
     </script>
 </body>
