@@ -91,15 +91,50 @@ def consume_next_start_mode():
         conn.close()
 
 
+def _first_ip(header_value):
+    """从一个头值里取出第一个 IP（兼容 `1.2.3.4:5678`、`[2001:db8::1]:443`、带引号）"""
+    for part in header_value.split(','):
+        ip = part.strip().strip('"')
+        if not ip:
+            continue
+        if ip.startswith('['):        # [2001:db8::1]:443
+            ip = ip[1:].split(']')[0]
+        elif ip.count(':') == 1:      # 1.2.3.4:5678
+            ip = ip.split(':')[0]
+        if ip:
+            return ip
+    return None
+
+
 def get_client_ip():
     """获取真实客户端 IP。
-    通过 Cloudflare Tunnel 部署时，Flask 收到的 TCP 连接来自本地的 cloudflared
-    进程（remote_addr 恒为 127.0.0.1），真实 IP 由 Cloudflare 边缘节点写入
-    CF-Connecting-IP 请求头，因此优先读取该头，其次回退到 X-Forwarded-For。
+
+    本服务前面挂着 Caddy 反向代理（Caddy 后面可能还有 Cloudflare Tunnel 的
+    cloudflared 进程），所以 waitress 这一层看到的 remote_addr 永远是上一跳
+    代理的地址（通常是 127.0.0.1），真实 IP 只能从转发头里取：
+
+    1. CF-Connecting-IP：Cloudflare 边缘节点写入，走了 Cloudflare 时最可靠；
+    2. X-Real-IP：由 Caddy 的 `header_up X-Real-IP {client_ip}` 写入，单值、干净；
+    3. X-Forwarded-For：逗号分隔的转发链，从左往右取第一个非内网地址。
+       注意 Caddy 默认会丢弃客户端传来的 X-Forwarded-For、改写成"上一跳"的地址，
+       所以在 cloudflared -> Caddy -> waitress 这种结构下它会退化成 127.0.0.1，
+       需要在 Caddy 里配置 trusted_proxies 才能拿到真实 IP（见项目说明）；
+    4. remote_addr：兜底，经过代理时通常就是 127.0.0.1。
     """
-    return (request.headers.get('CF-Connecting-IP')
-            or request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
-            or request.remote_addr)
+    for header in ('CF-Connecting-IP', 'True-Client-IP', 'X-Real-IP'):
+        ip = _first_ip(request.headers.get(header, ''))
+        if ip and not _is_private_ip(ip):
+            return ip
+
+    chain = [p.strip() for p in request.headers.get('X-Forwarded-For', '').split(',') if p.strip()]
+    for ip in chain:
+        if not _is_private_ip(ip):
+            return ip
+    if chain:
+        # 整条链都是内网地址：保留最后看到的地址，方便在 /admin 上看出是哪一跳
+        return chain[0]
+
+    return request.remote_addr
 
 
 def record_view(path):
@@ -535,6 +570,27 @@ def admin_ip_location():
     if not ip:
         return {'location': ''}, 400
     return {'location': lookup_ip_locations([ip]).get(ip, '未知')}
+
+
+@app.route('/admin/whoami')
+@admin_required
+def admin_whoami():
+    """排查用：显示服务器实际收到的转发头和解析出的客户端 IP。
+
+    用手机流量（不要用 WiFi）打开 /admin/whoami，即可确认真实 IP 有没有传到。
+    如果这里 forward_headers 里只有 127.0.0.1，说明是 Caddy 那一层把真实 IP
+    替换掉了，需要在 Caddy 配置里加 trusted_proxies。
+    """
+    forwarded = {
+        k: v for k, v in request.headers.items()
+        if k.lower().startswith('x-')
+        or k.lower() in ('cf-connecting-ip', 'true-client-ip', 'cf-ray')
+    }
+    return {
+        'client_ip': get_client_ip(),
+        'remote_addr': request.remote_addr,
+        'forwarded_headers': forwarded,
+    }
 
 
 @app.route('/')
