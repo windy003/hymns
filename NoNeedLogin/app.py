@@ -508,8 +508,11 @@ def admin():
     total_24h = conn.execute(
         'SELECT COUNT(*) c FROM page_views WHERE timestamp >= ?', (day_ago,)
     ).fetchone()['c']
+    # 排除 ip = ''（get_client_ip 解析失败时的占位值），否则空串会被当成
+    # 一个"独立 IP"多记一个，和下面列表里显示的 IP 对不上。
     unique_ip_24h = conn.execute(
-        'SELECT COUNT(DISTINCT ip) c FROM page_views WHERE timestamp >= ?', (day_ago,)
+        "SELECT COUNT(DISTINCT ip) c FROM page_views WHERE timestamp >= ? AND ip <> ''",
+        (day_ago,)
     ).fetchone()['c']
     total_all = conn.execute('SELECT COUNT(*) c FROM page_views').fetchone()['c']
 
@@ -528,8 +531,32 @@ def admin():
         })
     max_hourly = max((h['count'] for h in hourly), default=0)
 
+    # 最近 24 小时出现过的独立 IP（按访问次数排序）。上面的"独立 IP 数"就是
+    # 这张表的行数，两个数字从此可以对上；下面那张 50 条明细表是全部历史里
+    # 最新的 50 条原始记录，不去重也没有时间范围，两者本来就不是一回事。
+    unique_ips = [{
+        'ip': row['ip'],
+        'count': row['c'],
+        'last_time': datetime.fromtimestamp(row['t']).strftime('%m-%d %H:%M:%S')
+    } for row in conn.execute(
+        """SELECT ip, COUNT(*) c, MAX(timestamp) t
+           FROM page_views
+           WHERE timestamp >= ? AND ip <> ''
+           GROUP BY ip
+           ORDER BY c DESC""",
+        (day_ago,)
+    ).fetchall()]
+
+    # 每个 IP 的最近一次访问，同样去重，一个 IP 只占一行；path/时间都取自那次访问。
+    # 这里用到 SQLite 的一个特性：GROUP BY + MAX() 时，未聚合的列（path）
+    # 会取自 MAX 值所在的那一行，所以 path 就是该 IP 最后一次访问的路径。
     recent_rows = conn.execute(
-        'SELECT path, ip, timestamp FROM page_views ORDER BY timestamp DESC LIMIT 50'
+        """SELECT path, ip, MAX(timestamp) t
+           FROM page_views
+           WHERE ip <> ''
+           GROUP BY ip
+           ORDER BY t DESC
+           LIMIT 50"""
     ).fetchall()
     conn.close()
 
@@ -538,7 +565,7 @@ def admin():
     recent_views = [{
         'path': row['path'],
         'ip': row['ip'],
-        'time': datetime.fromtimestamp(row['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+        'time': datetime.fromtimestamp(row['t']).strftime('%Y-%m-%d %H:%M:%S')
     } for row in recent_rows]
 
     return render_template('admin.html',
@@ -547,6 +574,7 @@ def admin():
                          total_all=total_all,
                          hourly=hourly,
                          max_hourly=max_hourly,
+                         unique_ips=unique_ips,
                          recent_views=recent_views)
 
 
