@@ -532,8 +532,9 @@ def admin():
     max_hourly = max((h['count'] for h in hourly), default=0)
 
     # 最近 24 小时出现过的独立 IP（按访问次数排序）。上面的"独立 IP 数"就是
-    # 这张表的行数，两个数字从此可以对上；下面那张 50 条明细表是全部历史里
-    # 最新的 50 条原始记录，不去重也没有时间范围，两者本来就不是一回事。
+    # 这张表的行数，两个数字从此可以对上。
+    # 归属地不在这里批量查，避免一次刷新触发大量请求撞到 ip-api.com 的限流；
+    # 改为前端按需点击查询，见 /admin/ip_location 接口。
     unique_ips = [{
         'ip': row['ip'],
         'count': row['c'],
@@ -546,27 +547,7 @@ def admin():
            ORDER BY c DESC""",
         (day_ago,)
     ).fetchall()]
-
-    # 每个 IP 的最近一次访问，同样去重，一个 IP 只占一行；path/时间都取自那次访问。
-    # 这里用到 SQLite 的一个特性：GROUP BY + MAX() 时，未聚合的列（path）
-    # 会取自 MAX 值所在的那一行，所以 path 就是该 IP 最后一次访问的路径。
-    recent_rows = conn.execute(
-        """SELECT path, ip, MAX(timestamp) t
-           FROM page_views
-           WHERE ip <> ''
-           GROUP BY ip
-           ORDER BY t DESC
-           LIMIT 50"""
-    ).fetchall()
     conn.close()
-
-    # 归属地不在此处批量查询，避免一次刷新触发大量请求撞到 ip-api.com 的限流；
-    # 改为前端按需点击查询，见 /admin/ip_location 接口。
-    recent_views = [{
-        'path': row['path'],
-        'ip': row['ip'],
-        'time': datetime.fromtimestamp(row['t']).strftime('%Y-%m-%d %H:%M:%S')
-    } for row in recent_rows]
 
     return render_template('admin.html',
                          total_24h=total_24h,
@@ -574,8 +555,7 @@ def admin():
                          total_all=total_all,
                          hourly=hourly,
                          max_hourly=max_hourly,
-                         unique_ips=unique_ips,
-                         recent_views=recent_views)
+                         unique_ips=unique_ips)
 
 
 @app.route('/admin/ip_location')
