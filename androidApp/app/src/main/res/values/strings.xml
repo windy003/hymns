@@ -5,8 +5,8 @@
     <string name="refresh">刷新</string>
     <string name="server_url">网站地址</string>
     <string name="save">保存</string>
-    <string name="preset_server_url">https://zms-ydl.jdbendi.com/</string>
-    <string name="preset_server_url_2">https://zms-bydl.jdbendi.com/</string>
+    <string name="preset_server_url">https://zms-ydl.ysan.win/</string>
+    <string name="preset_server_url_2">https://zms-bydl.ysan.win/</string>
     <string name="preset_server_url_label">要登录</string>
     <string name="preset_server_url_2_label">不要登录</string>
     <string name="cancel">取消</string>
