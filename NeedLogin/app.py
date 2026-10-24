@@ -8,7 +8,7 @@ import ipaddress
 import urllib.request
 from pathlib import Path
 from functools import wraps
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
 from urllib.parse import urlparse, unquote, quote
 from flask import Flask, render_template, request, send_file, redirect, url_for, session, flash, abort, jsonify, g
 from dotenv import load_dotenv
@@ -53,6 +53,15 @@ CONFIG = {
 
 # 数据库路径
 DB_PATH = Path(__file__).parent / 'users.db'
+
+# 管理页展示的访问时间统一换算成北京时间（UTC+8），不依赖服务器本地时区。
+# 数据库里存的是 time.time() 时间戳，本身不带时区。
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def format_beijing_time(timestamp, fmt='%m-%d %H:%M:%S'):
+    """把 Unix 时间戳格式化为北京时间字符串。"""
+    return datetime.fromtimestamp(timestamp, BEIJING_TZ).strftime(fmt)
 
 
 def get_db():
@@ -1012,7 +1021,7 @@ def admin_users():
             (hour_start, hour_end)
         ).fetchone()['c']
         hourly.append({
-            'label': datetime.fromtimestamp(hour_end).strftime('%H:00'),
+            'label': format_beijing_time(hour_end, '%H:00'),
             'count': c
         })
     max_hourly = max((h['count'] for h in hourly), default=0)
@@ -1061,7 +1070,7 @@ def admin_users():
             'ip': row['ip'],
             'username': row['u'] or '未登录',
             'count': row['c'],
-            'last_time': datetime.fromtimestamp(row['t']).strftime('%m-%d %H:%M:%S'),
+            'last_time': format_beijing_time(row['t']),
             'region': region['display'],
             'scope': scope,
         })
@@ -1074,7 +1083,7 @@ def admin_users():
         'path': row['path'],
         'ip': row['ip'],
         'username': row['username'] or '未登录',
-        'time': datetime.fromtimestamp(row['timestamp']).strftime('%m-%d %H:%M:%S'),
+        'time': format_beijing_time(row['timestamp']),
         'region': ip2region_lookup(row['ip'])['display'],
     } for row in recent_rows]
 

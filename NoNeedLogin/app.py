@@ -7,7 +7,7 @@ import time
 import threading
 import urllib.request
 from functools import wraps
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse, unquote, quote
 from flask import Flask, render_template, send_file, redirect, url_for, flash, abort, request, session, Response
@@ -40,6 +40,15 @@ CONFIG = {
     'DEBUG': os.getenv('DEBUG', 'True').lower() == 'true',
     'ADMIN_PASSWORD': os.getenv('ADMIN_PASSWORD', 'admin123'),
 }
+
+# 管理页展示的访问时间统一换算成北京时间（UTC+8），不依赖服务器本地时区。
+# 数据库里存的是 time.time() 时间戳，本身不带时区。
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def format_beijing_time(timestamp, fmt='%m-%d %H:%M:%S'):
+    """把 Unix 时间戳格式化为北京时间字符串。"""
+    return datetime.fromtimestamp(timestamp, BEIJING_TZ).strftime(fmt)
 
 
 # ==================== 浏览量统计 ====================
@@ -523,7 +532,7 @@ def admin():
             (hour_start, hour_end)
         ).fetchone()['c']
         hourly.append({
-            'label': datetime.fromtimestamp(hour_end).strftime('%H:00'),
+            'label': format_beijing_time(hour_end, '%H:00'),
             'count': c
         })
     max_hourly = max((h['count'] for h in hourly), default=0)
@@ -567,7 +576,7 @@ def admin():
         unique_ips.append({
             'ip': row['ip'],
             'count': row['c'],
-            'last_time': datetime.fromtimestamp(row['t']).strftime('%m-%d %H:%M:%S'),
+            'last_time': format_beijing_time(row['t']),
             'region': region['display'],
             'scope': scope,
         })
