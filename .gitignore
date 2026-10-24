@@ -5,3 +5,4 @@ androidApp/.idea/
 .claude/
 NeedLogin/__pycache__/
 NoNeedLogin/__pycache__/
+data/

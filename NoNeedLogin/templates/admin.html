@@ -216,6 +216,32 @@
         .loc-result {
             font-size: 13px;
         }
+
+        .filter-bar {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 14px;
+        }
+
+        .filter-btn {
+            padding: 6px 14px;
+            font-size: 13px;
+            border: 1px solid var(--border-color-light);
+            border-radius: 16px;
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .filter-btn:hover { border-color: var(--accent-color); }
+
+        .filter-btn.active {
+            background: var(--accent-gradient);
+            border-color: transparent;
+            color: white;
+        }
     </style>
 </head>
 <body>
@@ -233,6 +259,18 @@
             <div class="stat-card">
                 <div class="value">{{ unique_ip_24h }}</div>
                 <div class="label">最近 24 小时独立 IP 浏览数</div>
+            </div>
+            <div class="stat-card">
+                <div class="value">{{ hangzhou_ip_24h }}</div>
+                <div class="label">最近 24 小时杭州独立 IP</div>
+            </div>
+            <div class="stat-card">
+                <div class="value">{{ zhejiang_ip_24h }}</div>
+                <div class="label">最近 24 小时浙江独立 IP</div>
+            </div>
+            <div class="stat-card">
+                <div class="value">{{ china_ip_24h }}</div>
+                <div class="label">最近 24 小时全国独立 IP</div>
             </div>
             <div class="stat-card">
                 <div class="value">{{ total_all }}</div>
@@ -256,6 +294,12 @@
         <div class="panel">
             <h2>最近 24 小时独立 IP（共 {{ unique_ips | length }} 个，按访问次数排序）</h2>
             {% if unique_ips %}
+            <div class="filter-bar">
+                <button type="button" class="filter-btn active" data-filter="all">全部 ({{ unique_ip_24h }})</button>
+                <button type="button" class="filter-btn" data-filter="hz">杭州市 ({{ hangzhou_ip_24h }})</button>
+                <button type="button" class="filter-btn" data-filter="zj">浙江省 ({{ zhejiang_ip_24h }})</button>
+                <button type="button" class="filter-btn" data-filter="cn">全国 ({{ china_ip_24h }})</button>
+            </div>
             <div class="table-wrap">
                 <table>
                     <thead>
@@ -266,21 +310,22 @@
                             <th>归属地</th>
                         </tr>
                     </thead>
-                    <tbody>
+                    <tbody id="ipTableBody">
                         {% for u in unique_ips %}
-                        <tr>
+                        <tr data-scope="{{ u.scope }}">
                             <td>{{ u.ip }}</td>
                             <td>{{ u.count }}</td>
                             <td>{{ u.last_time }}</td>
                             <td>
-                                <button type="button" class="loc-btn" data-ip="{{ u.ip }}">查询</button>
-                                <span class="loc-result"></span>
+                                <span class="loc-result" title="ip2region 离线库解析结果">{{ u.region or '未知' }}</span>
+                                <button type="button" class="loc-btn" data-ip="{{ u.ip }}" title="通过 ip-api.com 再查一次">API 查询</button>
                             </td>
                         </tr>
                         {% endfor %}
                     </tbody>
                 </table>
             </div>
+            <div class="empty" id="ipFilterEmpty" style="display: none;">该地区最近 24 小时暂无访问记录</div>
             {% else %}
             <div class="empty">暂无访问记录</div>
             {% endif %}
@@ -289,16 +334,18 @@
     </div>
 
     <script>
+        // 点击按钮通过 ip-api.com 再查一次归属地（ip2region 的结果已直接显示）。
+        // 保留 API 查询方式，方便和离线库结果对照或排查数据缺失。
         document.querySelectorAll('.loc-btn').forEach(function (btn) {
             btn.addEventListener('click', function () {
                 var ip = btn.dataset.ip;
-                var resultSpan = btn.nextElementSibling;
+                var resultSpan = btn.previousElementSibling;
                 btn.disabled = true;
                 btn.textContent = '查询中...';
                 fetch('/admin/ip_location?ip=' + encodeURIComponent(ip))
                     .then(function (res) { return res.json(); })
                     .then(function (data) {
-                        resultSpan.textContent = data.location || '未知';
+                        if (resultSpan) resultSpan.textContent = data.location || '未知';
                         btn.remove();
                     })
                     .catch(function () {
@@ -307,6 +354,43 @@
                     });
             });
         });
+
+        // 按地区筛选最近 24 小时的独立 IP。
+        // 杭州 ⊂ 浙江 ⊂ 全国，所以选“浙江省”时会同时显示杭州的 IP。
+        (function () {
+            var body = document.getElementById('ipTableBody');
+            if (!body) return;
+            var emptyTip = document.getElementById('ipFilterEmpty');
+            var rows = Array.prototype.slice.call(body.querySelectorAll('tr[data-scope]'));
+            var buttons = document.querySelectorAll('.filter-btn');
+
+            function matches(scope, filter) {
+                if (filter === 'all') return true;
+                if (filter === 'hz') return scope === 'hz';
+                if (filter === 'zj') return scope === 'hz' || scope === 'zj';
+                if (filter === 'cn') return scope === 'hz' || scope === 'zj' || scope === 'cn';
+                return scope === 'other';
+            }
+
+            function applyFilter(filter) {
+                var shown = 0;
+                rows.forEach(function (row) {
+                    var visible = matches(row.dataset.scope, filter);
+                    row.style.display = visible ? '' : 'none';
+                    if (visible) shown++;
+                });
+                if (emptyTip) emptyTip.style.display = shown ? 'none' : '';
+                buttons.forEach(function (btn) {
+                    btn.classList.toggle('active', btn.dataset.filter === filter);
+                });
+            }
+
+            buttons.forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    applyFilter(btn.dataset.filter);
+                });
+            });
+        })();
     </script>
 </body>
 </html>

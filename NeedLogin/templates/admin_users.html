@@ -527,6 +527,32 @@
             padding: 16px 0;
             text-align: center;
         }
+
+        .filter-bar {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+        }
+
+        .filter-btn {
+            padding: 6px 14px;
+            font-size: 13px;
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            background: var(--hover-bg);
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .filter-btn:hover { border-color: var(--accent-color); }
+
+        .filter-btn.active {
+            background: var(--accent-gradient);
+            border-color: transparent;
+            color: white;
+        }
     </style>
 </head>
 <body>
@@ -560,6 +586,18 @@
                     <div class="label">最近 24 小时独立 IP 访问量</div>
                 </div>
                 <div class="stat-box">
+                    <div class="value">{{ hangzhou_ip_24h }}</div>
+                    <div class="label">最近 24 小时杭州独立 IP</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ zhejiang_ip_24h }}</div>
+                    <div class="label">最近 24 小时浙江独立 IP</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{{ china_ip_24h }}</div>
+                    <div class="label">最近 24 小时全国独立 IP</div>
+                </div>
+                <div class="stat-box">
                     <div class="value">{{ total_all }}</div>
                     <div class="label">近 7 天累计浏览量</div>
                 </div>
@@ -580,6 +618,12 @@
             <div class="sub-block">
                 <h3 class="sub-title">最近 24 小时独立 IP（{{ unique_ips|length }} 个）</h3>
                 {% if unique_ips %}
+                <div class="filter-bar">
+                    <button type="button" class="filter-btn active" data-filter="all">全部 ({{ unique_ip_24h }})</button>
+                    <button type="button" class="filter-btn" data-filter="hz">杭州市 ({{ hangzhou_ip_24h }})</button>
+                    <button type="button" class="filter-btn" data-filter="zj">浙江省 ({{ zhejiang_ip_24h }})</button>
+                    <button type="button" class="filter-btn" data-filter="cn">全国 ({{ china_ip_24h }})</button>
+                </div>
                 <div class="table-wrap">
                     <table>
                         <thead>
@@ -591,22 +635,23 @@
                                 <th>归属地</th>
                             </tr>
                         </thead>
-                        <tbody>
+                        <tbody id="ipTableBody">
                             {% for u in unique_ips %}
-                            <tr>
+                            <tr data-scope="{{ u.scope }}">
                                 <td data-label="IP">{{ u.ip }}</td>
                                 <td data-label="登录名">{{ u.username }}</td>
                                 <td data-label="访问次数">{{ u.count }}</td>
                                 <td data-label="最近访问" class="text-muted">{{ u.last_time }}</td>
                                 <td data-label="归属地">
-                                    <button type="button" class="loc-btn" data-ip="{{ u.ip }}">查询</button>
-                                    <span class="loc-result"></span>
+                                    <span class="loc-result" title="ip2region 离线库解析结果">{{ u.region or '未知' }}</span>
+                                    <button type="button" class="loc-btn" data-ip="{{ u.ip }}" title="通过 ip-api.com 再查一次">API 查询</button>
                                 </td>
                             </tr>
                             {% endfor %}
                         </tbody>
                     </table>
                 </div>
+                <div class="empty-tip" id="ipFilterEmpty" style="display: none;">该地区最近 24 小时暂无访问记录</div>
                 {% else %}
                 <div class="empty-tip">最近 24 小时暂无访问记录</div>
                 {% endif %}
@@ -634,8 +679,8 @@
                                 <td data-label="路径">{{ v.path }}</td>
                                 <td data-label="IP">{{ v.ip }}</td>
                                 <td data-label="归属地">
-                                    <button type="button" class="loc-btn" data-ip="{{ v.ip }}">查询</button>
-                                    <span class="loc-result"></span>
+                                    <span class="loc-result" title="ip2region 离线库解析结果">{{ v.region or '未知' }}</span>
+                                    <button type="button" class="loc-btn" data-ip="{{ v.ip }}" title="通过 ip-api.com 再查一次">API 查询</button>
                                 </td>
                             </tr>
                             {% endfor %}
@@ -898,17 +943,17 @@
             }
         });
 
-        // 点击按钮查询 IP 归属地。
-        // 按需查询而不是开机就全查，避免一次刷新触发大量请求撞到 ip-api.com 的限流。
+        // 点击按钮通过 ip-api.com 再查一次归属地（ip2region 的结果已直接显示）。
+        // 保留 API 查询方式，方便和离线库结果对照或排查数据缺失。
         document.querySelectorAll('.loc-btn').forEach(function (btn) {
             btn.addEventListener('click', function () {
-                var resultSpan = btn.nextElementSibling;
+                var resultSpan = btn.previousElementSibling;
                 btn.disabled = true;
                 btn.textContent = '查询中...';
                 fetch('/admin/ip_location?ip=' + encodeURIComponent(btn.dataset.ip))
                     .then(function (res) { return res.json(); })
                     .then(function (data) {
-                        resultSpan.textContent = data.location || '未知';
+                        if (resultSpan) resultSpan.textContent = data.location || '未知';
                         btn.remove();
                     })
                     .catch(function () {
@@ -917,6 +962,43 @@
                     });
             });
         });
+
+        // 按地区筛选最近 24 小时的独立 IP。
+        // 杭州 ⊂ 浙江 ⊂ 全国，所以选“浙江省”时会同时显示杭州的 IP。
+        (function () {
+            var body = document.getElementById('ipTableBody');
+            if (!body) return;
+            var emptyTip = document.getElementById('ipFilterEmpty');
+            var rows = Array.prototype.slice.call(body.querySelectorAll('tr[data-scope]'));
+            var buttons = document.querySelectorAll('.filter-btn');
+
+            function matches(scope, filter) {
+                if (filter === 'all') return true;
+                if (filter === 'hz') return scope === 'hz';
+                if (filter === 'zj') return scope === 'hz' || scope === 'zj';
+                if (filter === 'cn') return scope === 'hz' || scope === 'zj' || scope === 'cn';
+                return scope === 'other';
+            }
+
+            function applyFilter(filter) {
+                var shown = 0;
+                rows.forEach(function (row) {
+                    var visible = matches(row.dataset.scope, filter);
+                    row.style.display = visible ? '' : 'none';
+                    if (visible) shown++;
+                });
+                if (emptyTip) emptyTip.style.display = shown ? 'none' : '';
+                buttons.forEach(function (btn) {
+                    btn.classList.toggle('active', btn.dataset.filter === filter);
+                });
+            }
+
+            buttons.forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    applyFilter(btn.dataset.filter);
+                });
+            });
+        })();
     </script>
 </body>
 </html>

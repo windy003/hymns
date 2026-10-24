@@ -14,6 +14,12 @@ from flask import Flask, render_template, send_file, redirect, url_for, flash, a
 from dotenv import load_dotenv
 from waitress import serve
 import oss2
+from ip2region_searcher import (
+    is_china as ip2region_is_china,
+    is_hangzhou as ip2region_is_hangzhou,
+    is_zhejiang as ip2region_is_zhejiang,
+    lookup as ip2region_lookup,
+)
 
 # 加载 .env 文件（override=True 确保 .env 配置优先于系统环境变量）
 load_dotenv(override=True)
@@ -151,24 +157,15 @@ _IP_LOCATION_CACHE_TTL = 24 * 3600
 
 
 def _is_private_ip(ip):
-    """判断是否为内网/本地地址，这类地址无法查询归属地"""
+    """判断是否为内网/本地地址，这类地址无法查询归属地（IPv4 / IPv6 都支持）"""
     if not ip:
         return True
-    if ip in ('127.0.0.1', 'localhost', '::1'):
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
         return True
-    parts = ip.split('.')
-    if len(parts) == 4:
-        try:
-            a, b = int(parts[0]), int(parts[1])
-        except ValueError:
-            return False
-        if a == 10 or a == 127:
-            return True
-        if a == 172 and 16 <= b <= 31:
-            return True
-        if a == 192 and b == 168:
-            return True
-    return False
+    return (address.is_private or address.is_loopback or address.is_link_local
+            or address.is_reserved or address.is_multicast or address.is_unspecified)
 
 
 def lookup_ip_locations(ips):
@@ -533,25 +530,54 @@ def admin():
 
     # 最近 24 小时出现过的独立 IP（按访问次数排序）。上面的"独立 IP 数"就是
     # 这张表的行数，两个数字从此可以对上。
-    # 归属地不在这里批量查，避免一次刷新触发大量请求撞到 ip-api.com 的限流；
-    # 改为前端按需点击查询，见 /admin/ip_location 接口。
-    unique_ips = [{
-        'ip': row['ip'],
-        'count': row['c'],
-        'last_time': datetime.fromtimestamp(row['t']).strftime('%m-%d %H:%M:%S')
-    } for row in conn.execute(
+    # 归属地统一用 ip2region 离线库（data/ip2region_v4.xdb + v6.xdb）解析，
+    # 纯内存查询，可以一次算完所有 IP；/admin/ip_location 的 ip-api.com
+    # 查询方式仍然保留，页面上的「API 查询」按钮继续可用。
+    unique_ip_rows = conn.execute(
         """SELECT ip, COUNT(*) c, MAX(timestamp) t
            FROM page_views
            WHERE timestamp >= ? AND ip <> ''
            GROUP BY ip
            ORDER BY c DESC""",
         (day_ago,)
-    ).fetchall()]
+    ).fetchall()
     conn.close()
+
+    unique_ips = []
+    hangzhou_ip_24h = zhejiang_ip_24h = china_ip_24h = 0
+    for row in unique_ip_rows:
+        region = ip2region_lookup(row['ip'])
+        in_hangzhou = ip2region_is_hangzhou(region)
+        in_zhejiang = ip2region_is_zhejiang(region)
+        in_china = ip2region_is_china(region)
+        if in_hangzhou:
+            hangzhou_ip_24h += 1
+        if in_zhejiang:
+            zhejiang_ip_24h += 1
+        if in_china:
+            china_ip_24h += 1
+        if in_hangzhou:
+            scope = 'hz'
+        elif in_zhejiang:
+            scope = 'zj'
+        elif in_china:
+            scope = 'cn'
+        else:
+            scope = 'other'
+        unique_ips.append({
+            'ip': row['ip'],
+            'count': row['c'],
+            'last_time': datetime.fromtimestamp(row['t']).strftime('%m-%d %H:%M:%S'),
+            'region': region['display'],
+            'scope': scope,
+        })
 
     return render_template('admin.html',
                          total_24h=total_24h,
                          unique_ip_24h=unique_ip_24h,
+                         hangzhou_ip_24h=hangzhou_ip_24h,
+                         zhejiang_ip_24h=zhejiang_ip_24h,
+                         china_ip_24h=china_ip_24h,
                          total_all=total_all,
                          hourly=hourly,
                          max_hourly=max_hourly,
