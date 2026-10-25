@@ -628,7 +628,7 @@
                     <table>
                         <thead>
                             <tr>
-                                <th>IP</th>
+                                <th title="经 Cloudflare 时为 CF-Connecting-IP 中的用户真实 IP">客户端 IP</th>
                                 <th>登录名</th>
                                 <th>访问次数</th>
                                 <th>最近访问（北京时间）</th>
@@ -638,7 +638,7 @@
                         <tbody id="ipTableBody">
                             {% for u in unique_ips %}
                             <tr data-scope="{{ u.scope }}">
-                                <td data-label="IP">{{ u.ip }}</td>
+                                <td data-label="客户端 IP">{{ u.ip }}</td>
                                 <td data-label="登录名">{{ u.username }}</td>
                                 <td data-label="访问次数">{{ u.count }}</td>
                                 <td data-label="最近访问" class="text-muted">{{ u.last_time }}</td>
@@ -652,6 +652,9 @@
                     </table>
                 </div>
                 <div class="empty-tip" id="ipFilterEmpty" style="display: none;">该地区最近 24 小时暂无访问记录</div>
+                <p class="text-muted" style="margin-top:8px;">
+                    客户端 IP 优先取 Cloudflare 的 CF-Connecting-IP；修复前的历史记录可能仍是 CF 边缘节点 IP。
+                </p>
                 {% else %}
                 <div class="empty-tip">最近 24 小时暂无访问记录</div>
                 {% endif %}
@@ -667,7 +670,7 @@
                                 <th>时间（北京时间）</th>
                                 <th>登录名</th>
                                 <th>路径</th>
-                                <th>IP</th>
+                                <th title="经 Cloudflare 时为 CF-Connecting-IP 中的用户真实 IP">客户端 IP</th>
                                 <th>归属地</th>
                             </tr>
                         </thead>
@@ -677,7 +680,7 @@
                                 <td data-label="时间" class="text-muted">{{ v.time }}</td>
                                 <td data-label="登录名">{{ v.username }}</td>
                                 <td data-label="路径">{{ v.path }}</td>
-                                <td data-label="IP">{{ v.ip }}</td>
+                                <td data-label="客户端 IP">{{ v.ip }}</td>
                                 <td data-label="归属地">
                                     <span class="loc-result" title="ip2region 离线库解析结果">{{ v.region or '未知' }}</span>
                                     <button type="button" class="loc-btn" data-ip="{{ v.ip }}" title="通过 ip-api.com 再查一次">API 查询</button>

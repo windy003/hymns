@@ -64,9 +64,15 @@ def init_views_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             path TEXT NOT NULL,
             ip TEXT,
+            client_ip TEXT DEFAULT '',
             timestamp REAL NOT NULL
         )
     ''')
+    # 迁移老库：把 Cloudflare 写入的用户真实 IP（CF-Connecting-IP）单独存下来。
+    # 老数据没有这一列，补成空字符串，展示时回退到 ip。
+    columns = [row[1] for row in conn.execute('PRAGMA table_info(page_views)').fetchall()]
+    if 'client_ip' not in columns:
+        conn.execute("ALTER TABLE page_views ADD COLUMN client_ip TEXT DEFAULT ''")
     conn.execute('CREATE INDEX IF NOT EXISTS idx_page_views_timestamp ON page_views (timestamp)')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS server_display_state (
@@ -149,6 +155,23 @@ def _is_cloudflare_ip(ip):
                if network.version == address.version)
 
 
+def get_cloudflare_client_ip():
+    """读取 Cloudflare 边缘写入的用户真实 IP（CF-Connecting-IP）。
+
+    头不存在或内容不是合法 IP 时返回空字符串。Cloudflare 会覆盖客户端自带的
+    同名头，所以只要流量确实经过 Cloudflare，这个值就是用户真实 IP。
+    注意：源站应只允许 Cloudflare 节点访问，否则直连源站的人可以伪造该头。
+    """
+    value = (request.headers.get('CF-Connecting-IP') or '').strip()
+    if not value:
+        return ''
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return ''
+    return value
+
+
 def get_client_ip():
     """获取真实客户端 IP。
 
@@ -161,9 +184,8 @@ def get_client_ip():
       * 走了 Cloudflare：对端是 Cloudflare 边缘节点 IP，直接记录会得到
         “CF 边缘节点 IP”而不是用户真实 IP。
 
-    Cloudflare 会在边缘覆盖写入 CF-Connecting-IP（用户真实 IP）。这里只在
-    直连方确实是 Cloudflare 边缘节点，或来自本机 cloudflared/Caddy（回环）时
-    才采信这个头，避免源站被直接访问时伪造。
+    所以这里优先取 CF-Connecting-IP；只有直连方确实是 Cloudflare 边缘节点，
+    或来自本机 cloudflared/Caddy（回环）时才采信，避免直连源站时伪造。
     """
     ip = (request.remote_addr or '').strip()
     # 兜底：请求仍来自本机代理时（代理地址不是 127.0.0.1、trusted_proxy 没命中），
@@ -174,14 +196,9 @@ def get_client_ip():
         if xff:
             ip = xff.rsplit(',', 1)[-1].strip()
 
-    cf_ip = (request.headers.get('CF-Connecting-IP') or '').strip()
+    cf_ip = get_cloudflare_client_ip()
     if cf_ip and (ip in LOOPBACK_PROXIES or _is_cloudflare_ip(ip)):
-        try:
-            ipaddress.ip_address(cf_ip)
-        except ValueError:
-            pass
-        else:
-            ip = cf_ip
+        ip = cf_ip
 
     # 校验合法性，非法内容直接丢弃，避免垃圾数据进入统计
     try:
@@ -196,8 +213,12 @@ def record_view(path):
     now = time.time()
     try:
         conn = sqlite3.connect(str(VIEWS_DB_PATH))
-        conn.execute('INSERT INTO page_views (path, ip, timestamp) VALUES (?, ?, ?)',
-                     (path, get_client_ip(), now))
+        # client_ip 单独保存 CF-Connecting-IP，管理页优先显示它；
+        # 没经过 Cloudflare 时为空，展示时回退到 ip。
+        conn.execute(
+            'INSERT INTO page_views (path, ip, client_ip, timestamp) VALUES (?, ?, ?, ?)',
+            (path, get_client_ip(), get_cloudflare_client_ip(), now)
+        )
         conn.execute('DELETE FROM page_views WHERE timestamp < ?', (now - 7 * 24 * 3600,))
         conn.commit()
         conn.close()
@@ -564,10 +585,12 @@ def admin():
     total_24h = conn.execute(
         'SELECT COUNT(*) c FROM page_views WHERE timestamp >= ?', (day_ago,)
     ).fetchone()['c']
-    # 排除 ip = ''（get_client_ip 解析失败时的占位值），否则空串会被当成
-    # 一个"独立 IP"多记一个，和下面列表里显示的 IP 对不上。
+    # 优先按 client_ip（CF-Connecting-IP，用户真实 IP）统计；老数据没有
+    # client_ip 时回退到 ip。空值要排除，否则空串会被多记成一个"独立 IP"。
     unique_ip_24h = conn.execute(
-        "SELECT COUNT(DISTINCT ip) c FROM page_views WHERE timestamp >= ? AND ip <> ''",
+        "SELECT COUNT(DISTINCT COALESCE(NULLIF(client_ip, ''), ip)) c "
+        "FROM page_views WHERE timestamp >= ? "
+        "AND COALESCE(NULLIF(client_ip, ''), ip) <> ''",
         (day_ago,)
     ).fetchone()['c']
     total_all = conn.execute('SELECT COUNT(*) c FROM page_views').fetchone()['c']
@@ -593,10 +616,12 @@ def admin():
     # 纯内存查询，可以一次算完所有 IP；/admin/ip_location 的 ip-api.com
     # 查询方式仍然保留，页面上的「API 查询」按钮继续可用。
     unique_ip_rows = conn.execute(
-        """SELECT ip, COUNT(*) c, MAX(timestamp) t
+        """SELECT COALESCE(NULLIF(client_ip, ''), ip) AS ip,
+                  COUNT(*) c, MAX(timestamp) t
            FROM page_views
-           WHERE timestamp >= ? AND ip <> ''
-           GROUP BY ip
+           WHERE timestamp >= ?
+             AND COALESCE(NULLIF(client_ip, ''), ip) <> ''
+           GROUP BY COALESCE(NULLIF(client_ip, ''), ip)
            ORDER BY c DESC""",
         (day_ago,)
     ).fetchall()
@@ -663,8 +688,9 @@ def admin_whoami():
     * `cf_connecting_ip`：Cloudflare 边缘写入的用户真实 IP（没走 CF 时为空）。
     * `remote_addr`：waitress 按 X-Forwarded-For 解析后的直连对端。
       走了 Cloudflare + Caddy 时，这里通常是一个 Cloudflare 边缘节点 IP。
-    * `client_ip`：最终用于统计的 IP。直连方是 Cloudflare 边缘或本机
-      cloudflared/Caddy 时，会优先采用 `cf_connecting_ip`。
+    * `client_ip`：后台统计/24 小时记录最终显示的 IP。
+      有 `cf_connecting_ip` 时直接用它，否则回退到解析出的直连 IP。
+    * `resolved_ip`：按代理链规则解析出的 IP（受信任检查影响）。
     * `cloudflare_edge`：remote_addr 是否落在 Cloudflare 网段内。
 
     如果 client_ip 和手机流量的实际公网 IP 一致，说明解析正确。
@@ -675,7 +701,8 @@ def admin_whoami():
         or k.lower() in ('cf-connecting-ip', 'true-client-ip', 'cf-ray')
     }
     return {
-        'client_ip': get_client_ip(),
+        'client_ip': get_cloudflare_client_ip() or get_client_ip(),
+        'resolved_ip': get_client_ip(),
         'remote_addr': request.remote_addr,
         'cf_connecting_ip': request.headers.get('CF-Connecting-IP', ''),
         'cloudflare_edge': _is_cloudflare_ip(request.remote_addr or ''),

@@ -304,7 +304,7 @@
                 <table>
                     <thead>
                         <tr>
-                            <th>IP</th>
+                            <th title="经 Cloudflare 时为 CF-Connecting-IP 中的用户真实 IP">客户端 IP</th>
                             <th>访问次数</th>
                             <th>最后访问（北京时间）</th>
                             <th>归属地</th>
@@ -326,6 +326,9 @@
                 </table>
             </div>
             <div class="empty" id="ipFilterEmpty" style="display: none;">该地区最近 24 小时暂无访问记录</div>
+            <p style="margin-top:8px;font-size:12px;color:var(--text-muted);">
+                客户端 IP 优先取 Cloudflare 的 CF-Connecting-IP；修复前的历史记录可能仍是 CF 边缘节点 IP。
+            </p>
             {% else %}
             <div class="empty">暂无访问记录</div>
             {% endif %}

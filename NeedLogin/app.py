@@ -120,16 +120,21 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         path TEXT NOT NULL,
         ip TEXT,
+        client_ip TEXT DEFAULT '',
         username TEXT DEFAULT '',
         timestamp REAL NOT NULL
     )''')
     db.execute('CREATE INDEX IF NOT EXISTS idx_page_views_timestamp ON page_views (timestamp)')
 
-    # 迁移：老库补 username 列（未登录的访问记为 ''，管理页显示"未登录"）
+    # 迁移：老库补 username / client_ip 列
+    # client_ip 保存 Cloudflare 写入的用户真实 IP（CF-Connecting-IP），
+    # 老数据没有这一列，补成空字符串，展示时回退到 ip。
     cursor = db.execute("PRAGMA table_info(page_views)")
     columns = [col[1] for col in cursor.fetchall()]
     if 'username' not in columns:
         db.execute("ALTER TABLE page_views ADD COLUMN username TEXT DEFAULT ''")
+    if 'client_ip' not in columns:
+        db.execute("ALTER TABLE page_views ADD COLUMN client_ip TEXT DEFAULT ''")
 
     # 确保管理员账号存在
     admin = db.execute('SELECT id FROM users WHERE username = ?',
@@ -891,6 +896,23 @@ def _is_cloudflare_ip(ip):
                if network.version == address.version)
 
 
+def get_cloudflare_client_ip():
+    """读取 Cloudflare 边缘写入的用户真实 IP（CF-Connecting-IP）。
+
+    头不存在或内容不是合法 IP 时返回空字符串。Cloudflare 会覆盖客户端自带的
+    同名头，所以只要流量确实经过 Cloudflare，这个值就是用户真实 IP。
+    注意：源站应只允许 Cloudflare 节点访问，否则直连源站的人可以伪造该头。
+    """
+    value = (request.headers.get('CF-Connecting-IP') or '').strip()
+    if not value:
+        return ''
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return ''
+    return value
+
+
 def get_client_ip():
     """获取真实访客 IP。
 
@@ -903,9 +925,8 @@ def get_client_ip():
       * 走了 Cloudflare：对端是 Cloudflare 边缘节点 IP，直接记录会得到
         “CF 边缘节点 IP”而不是用户真实 IP。
 
-    Cloudflare 会在边缘覆盖写入 CF-Connecting-IP（用户真实 IP）。这里只在
-    直连方确实是 Cloudflare 边缘节点，或来自本机 cloudflared/Caddy（回环）时
-    才采信这个头，避免源站被直接访问时伪造。
+    所以这里优先取 CF-Connecting-IP；只有直连方确实是 Cloudflare 边缘节点，
+    或来自本机 cloudflared/Caddy（回环）时才采信，避免直连源站时伪造。
     """
     ip = (request.remote_addr or '').strip()
     # 兜底：请求仍来自本机代理时（trusted_proxy 没命中），自己去读 XFF 最后一段，
@@ -915,14 +936,9 @@ def get_client_ip():
         if xff:
             ip = xff.rsplit(',', 1)[-1].strip()
 
-    cf_ip = (request.headers.get('CF-Connecting-IP') or '').strip()
+    cf_ip = get_cloudflare_client_ip()
     if cf_ip and (ip in LOOPBACK_PROXIES or _is_cloudflare_ip(ip)):
-        try:
-            ipaddress.ip_address(cf_ip)
-        except ValueError:
-            pass
-        else:
-            ip = cf_ip
+        ip = cf_ip
 
     # 校验合法性，非法内容直接丢弃，避免垃圾数据进入统计
     try:
@@ -941,8 +957,13 @@ def record_view(path):
     username = session.get('username') or ''
     try:
         db = get_db()
-        db.execute('INSERT INTO page_views (path, ip, username, timestamp) VALUES (?, ?, ?, ?)',
-                   (path, get_client_ip(), username, now))
+        # client_ip 单独保存 CF-Connecting-IP，管理页优先显示它；
+        # 没经过 Cloudflare 时为空，展示时回退到 ip。
+        db.execute(
+            'INSERT INTO page_views (path, ip, client_ip, username, timestamp) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (path, get_client_ip(), get_cloudflare_client_ip(), username, now)
+        )
         db.execute('DELETE FROM page_views WHERE timestamp < ?', (now - 7 * 24 * 3600,))
         db.commit()
     except Exception:
@@ -1059,8 +1080,12 @@ def admin_users():
     total_24h = db.execute(
         'SELECT COUNT(*) c FROM page_views WHERE timestamp >= ?', (day_ago,)
     ).fetchone()['c']
+    # 优先按 client_ip（CF-Connecting-IP，用户真实 IP）统计；老数据没有
+    # client_ip 时回退到 ip。空值要排除，否则空串会被多记成一个"独立 IP"。
     unique_ip_24h = db.execute(
-        "SELECT COUNT(DISTINCT ip) c FROM page_views WHERE timestamp >= ? AND ip <> ''",
+        "SELECT COUNT(DISTINCT COALESCE(NULLIF(client_ip, ''), ip)) c "
+        "FROM page_views WHERE timestamp >= ? "
+        "AND COALESCE(NULLIF(client_ip, ''), ip) <> ''",
         (day_ago,)
     ).fetchone()['c']
     total_all = db.execute('SELECT COUNT(*) c FROM page_views').fetchone()['c']
@@ -1086,15 +1111,17 @@ def admin_users():
     # 查询方式仍然保留，页面上的「API 查询」按钮继续可用。
     # 子查询取的是该 IP 最近一次访问用的登录名，空字符串显示为"未登录"。
     unique_ip_rows = db.execute(
-        """SELECT p.ip,
+        """SELECT COALESCE(NULLIF(p.client_ip, ''), p.ip) AS ip,
                   COUNT(*) c,
                   MAX(p.timestamp) t,
                   (SELECT username FROM page_views p2
-                   WHERE p2.ip = p.ip
+                   WHERE COALESCE(NULLIF(p2.client_ip, ''), p2.ip) =
+                         COALESCE(NULLIF(p.client_ip, ''), p.ip)
                    ORDER BY p2.timestamp DESC LIMIT 1) u
            FROM page_views p
-           WHERE p.timestamp >= ? AND p.ip <> ''
-           GROUP BY p.ip
+           WHERE p.timestamp >= ?
+             AND COALESCE(NULLIF(p.client_ip, ''), p.ip) <> ''
+           GROUP BY COALESCE(NULLIF(p.client_ip, ''), p.ip)
            ORDER BY c DESC""",
         (day_ago,)
     ).fetchall()
@@ -1129,16 +1156,18 @@ def admin_users():
             'scope': scope,
         })
 
-    # 最近的明细访问记录（含登录名），逐条看谁在什么时间看了什么
+    # 最近的明细访问记录（含登录名），逐条看谁在什么时间看了什么。
+    # 展示时优先用 client_ip（CF-Connecting-IP），老数据回退到 ip。
     recent_rows = db.execute(
-        'SELECT path, ip, username, timestamp FROM page_views ORDER BY timestamp DESC LIMIT 50'
+        'SELECT path, ip, client_ip, username, timestamp FROM page_views '
+        'ORDER BY timestamp DESC LIMIT 50'
     ).fetchall()
     recent_views = [{
         'path': row['path'],
-        'ip': row['ip'],
+        'ip': row['client_ip'] or row['ip'],
         'username': row['username'] or '未登录',
         'time': format_beijing_time(row['timestamp']),
-        'region': ip2region_lookup(row['ip'])['display'],
+        'region': ip2region_lookup(row['client_ip'] or row['ip'])['display'],
     } for row in recent_rows]
 
     return render_template('admin_users.html', users=users, user_sessions=user_sessions,
