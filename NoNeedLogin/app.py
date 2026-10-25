@@ -110,29 +110,79 @@ def consume_next_start_mode():
 # 本机反向代理（Caddy）可能用 IPv4 或 IPv6 回环地址连过来
 LOOPBACK_PROXIES = {'127.0.0.1', '::1'}
 
+# Cloudflare 公布的边缘节点网段（来源 https://www.cloudflare.com/ips/）。
+# 只有直连方确实是 Cloudflare 边缘节点时，才采信它写入的 CF-Connecting-IP，
+# 防止源站被直接访问时攻击者伪造该头。
+CLOUDFLARE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
+    '173.245.48.0/20',
+    '103.21.244.0/22',
+    '103.22.200.0/22',
+    '103.31.4.0/22',
+    '141.101.64.0/18',
+    '108.162.192.0/18',
+    '190.93.240.0/20',
+    '188.114.96.0/20',
+    '197.234.240.0/22',
+    '198.41.128.0/17',
+    '162.158.0.0/15',
+    '104.16.0.0/13',
+    '104.24.0.0/14',
+    '172.64.0.0/13',
+    '131.0.72.0/22',
+    '2400:cb00::/32',
+    '2606:4700::/32',
+    '2803:f800::/32',
+    '2405:b500::/32',
+    '2405:8100::/32',
+    '2a06:98c0::/29',
+    '2c0f:f248::/32',
+))
+
+
+def _is_cloudflare_ip(ip):
+    """判断是否为 Cloudflare 边缘节点 IP。"""
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(address in network for network in CLOUDFLARE_NETWORKS
+               if network.version == address.version)
+
 
 def get_client_ip():
     """获取真实客户端 IP。
 
-    链路是 Caddy(本机) -> waitress -> Flask。waitress 从 2.0 起默认会把
-    X-Forwarded-* 头整个丢掉（clear_untrusted_proxy_headers 默认为 True），
-    所以以前不管怎么读 XFF 都读不到，只能退回 127.0.0.1。
+    链路可能是：Cloudflare -> Caddy(本机) -> waitress -> Flask。
 
-    现在启动时用 trusted_proxy='127.0.0.1' 声明信任本机代理（见文件末尾 serve），
-    waitress 会把 Caddy 追加在 X-Forwarded-For 末尾的真实客户端 IP 解析出来，
-    直接重写成 request.remote_addr —— 所以正常情况读 remote_addr 就是真实 IP。
+    waitress 启动时用 trusted_proxy='127.0.0.1' 声明信任本机 Caddy，会把
+    X-Forwarded-For 里 Caddy 追加的那一段解析成 request.remote_addr。
+    但 Caddy 默认追加的是它的直连对端地址：
+      * 没走 Cloudflare：对端就是用户真实 IP，直接可用；
+      * 走了 Cloudflare：对端是 Cloudflare 边缘节点 IP，直接记录会得到
+        “CF 边缘节点 IP”而不是用户真实 IP。
 
-    不要再读 CF-Connecting-IP：站点已不走 Cloudflare，该头没人清理，
-    客户端可以随意伪造。
+    Cloudflare 会在边缘覆盖写入 CF-Connecting-IP（用户真实 IP）。这里只在
+    直连方确实是 Cloudflare 边缘节点，或来自本机 cloudflared/Caddy（回环）时
+    才采信这个头，避免源站被直接访问时伪造。
     """
     ip = (request.remote_addr or '').strip()
     # 兜底：请求仍来自本机代理时（代理地址不是 127.0.0.1、trusted_proxy 没命中），
-    # 自己去读 X-Forwarded-For —— 只取最后一段，因为 Caddy 把真实 IP 追加在最右侧，
+    # 自己去读 X-Forwarded-For —— 只取最后一段，因为 Caddy 把直连对端追加在最右侧，
     # 最左边是客户端可以随意伪造的，取它会往统计里灌假 IP。
     if ip in LOOPBACK_PROXIES:
         xff = request.headers.get('X-Forwarded-For', '')
         if xff:
             ip = xff.rsplit(',', 1)[-1].strip()
+
+    cf_ip = (request.headers.get('CF-Connecting-IP') or '').strip()
+    if cf_ip and (ip in LOOPBACK_PROXIES or _is_cloudflare_ip(ip)):
+        try:
+            ipaddress.ip_address(cf_ip)
+        except ValueError:
+            pass
+        else:
+            ip = cf_ip
+
     # 校验合法性，非法内容直接丢弃，避免垃圾数据进入统计
     try:
         ipaddress.ip_address(ip)
@@ -610,11 +660,14 @@ def admin_whoami():
 
     用手机流量（不要用 WiFi）打开 /admin/whoami，即可确认真实 IP 有没有传到。
 
-    正常情况下 client_ip 和 remote_addr 都应该是真实公网 IP：
-    waitress 已在启动时声明信任本机 Caddy，会把 X-Forwarded-For 最后一段
-    （Caddy 追加的真实客户端 IP）解析进 remote_addr。
-    如果 forwarded_headers 是空的、remote_addr 又是 127.0.0.1，
-    说明启动参数没生效（服务没重启，或 waitress 版本太旧）。
+    * `cf_connecting_ip`：Cloudflare 边缘写入的用户真实 IP（没走 CF 时为空）。
+    * `remote_addr`：waitress 按 X-Forwarded-For 解析后的直连对端。
+      走了 Cloudflare + Caddy 时，这里通常是一个 Cloudflare 边缘节点 IP。
+    * `client_ip`：最终用于统计的 IP。直连方是 Cloudflare 边缘或本机
+      cloudflared/Caddy 时，会优先采用 `cf_connecting_ip`。
+    * `cloudflare_edge`：remote_addr 是否落在 Cloudflare 网段内。
+
+    如果 client_ip 和手机流量的实际公网 IP 一致，说明解析正确。
     """
     forwarded = {
         k: v for k, v in request.headers.items()
@@ -624,6 +677,8 @@ def admin_whoami():
     return {
         'client_ip': get_client_ip(),
         'remote_addr': request.remote_addr,
+        'cf_connecting_ip': request.headers.get('CF-Connecting-IP', ''),
+        'cloudflare_edge': _is_cloudflare_ip(request.remote_addr or ''),
         'forwarded_headers': forwarded,
     }
 
@@ -866,9 +921,10 @@ if __name__ == '__main__':
     else:
         # 生产模式：waitress WSGI 服务器，多线程并发处理请求
         # 必须告诉 waitress 本机 Caddy 是可信代理，否则它会把 X-Forwarded-For
-        # 整个丢掉，我们永远拿不到真实访客 IP（见 get_client_ip 注释）。
-        # trusted_proxy_count=1 表示代理链上只有 Caddy 一跳，解析时取 XFF 最后一段，
-        # 也就是 Caddy 追加的真实客户端 IP，客户端自己伪造的前几段不会被采信。
+        # 整个丢掉，我们永远拿不到访客 IP（见 get_client_ip 注释）。
+        # trusted_proxy_count=1 表示只取 XFF 最后一段，也就是 Caddy 的直连对端。
+        # 如果前面还有 Cloudflare，这一段会是 CF 边缘节点 IP，get_client_ip
+        # 会再根据 CF-Connecting-IP 还原成用户真实 IP。
         try:
             serve(app, host=CONFIG['HOST'], port=CONFIG['PORT'], threads=8,
                   trusted_proxy='127.0.0.1',

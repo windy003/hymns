@@ -852,24 +852,78 @@ VIEW_TRACKED_ENDPOINTS = {'index', 'play', 'view', 'download'}
 # 本机反向代理（Caddy）可能用 IPv4 或 IPv6 回环地址连过来
 LOOPBACK_PROXIES = {'127.0.0.1', '::1'}
 
+# Cloudflare 公布的边缘节点网段（来源 https://www.cloudflare.com/ips/）。
+# 只有直连方确实是 Cloudflare 边缘节点时，才采信它写入的 CF-Connecting-IP，
+# 防止源站被直接访问时攻击者伪造该头。
+CLOUDFLARE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
+    '173.245.48.0/20',
+    '103.21.244.0/22',
+    '103.22.200.0/22',
+    '103.31.4.0/22',
+    '141.101.64.0/18',
+    '108.162.192.0/18',
+    '190.93.240.0/20',
+    '188.114.96.0/20',
+    '197.234.240.0/22',
+    '198.41.128.0/17',
+    '162.158.0.0/15',
+    '104.16.0.0/13',
+    '104.24.0.0/14',
+    '172.64.0.0/13',
+    '131.0.72.0/22',
+    '2400:cb00::/32',
+    '2606:4700::/32',
+    '2803:f800::/32',
+    '2405:b500::/32',
+    '2405:8100::/32',
+    '2a06:98c0::/29',
+    '2c0f:f248::/32',
+))
+
+
+def _is_cloudflare_ip(ip):
+    """判断是否为 Cloudflare 边缘节点 IP。"""
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(address in network for network in CLOUDFLARE_NETWORKS
+               if network.version == address.version)
+
 
 def get_client_ip():
     """获取真实访客 IP。
 
-    链路是 Caddy(本机) -> waitress -> Flask。启动时用 trusted_proxy='127.0.0.1'
-    声明信任本机代理（见文件末尾 serve），waitress 会把 Caddy 追加在
-    X-Forwarded-For 末尾的真实客户端 IP 解析出来，直接重写成 request.remote_addr，
-    所以正常情况读 remote_addr 就是真实 IP。
+    链路可能是：Cloudflare -> Caddy(本机) -> waitress -> Flask。
 
-    不要再读 CF-Connecting-IP：站点不走 Cloudflare，该头没人清理，可被随意伪造。
+    waitress 启动时用 trusted_proxy='127.0.0.1' 声明信任本机 Caddy，会把
+    X-Forwarded-For 里 Caddy 追加的那一段解析成 request.remote_addr。
+    但 Caddy 默认追加的是它的直连对端地址：
+      * 没走 Cloudflare：对端就是用户真实 IP，直接可用；
+      * 走了 Cloudflare：对端是 Cloudflare 边缘节点 IP，直接记录会得到
+        “CF 边缘节点 IP”而不是用户真实 IP。
+
+    Cloudflare 会在边缘覆盖写入 CF-Connecting-IP（用户真实 IP）。这里只在
+    直连方确实是 Cloudflare 边缘节点，或来自本机 cloudflared/Caddy（回环）时
+    才采信这个头，避免源站被直接访问时伪造。
     """
     ip = (request.remote_addr or '').strip()
     # 兜底：请求仍来自本机代理时（trusted_proxy 没命中），自己去读 XFF 最后一段，
-    # 因为 Caddy 把真实 IP 追加在最右侧，最左边是客户端可以随意伪造的。
+    # 因为 Caddy 把直连对端追加在最右侧，最左边是客户端可以随意伪造的。
     if ip in LOOPBACK_PROXIES:
         xff = request.headers.get('X-Forwarded-For', '')
         if xff:
             ip = xff.rsplit(',', 1)[-1].strip()
+
+    cf_ip = (request.headers.get('CF-Connecting-IP') or '').strip()
+    if cf_ip and (ip in LOOPBACK_PROXIES or _is_cloudflare_ip(ip)):
+        try:
+            ipaddress.ip_address(cf_ip)
+        except ValueError:
+            pass
+        else:
+            ip = cf_ip
+
     # 校验合法性，非法内容直接丢弃，避免垃圾数据进入统计
     try:
         ipaddress.ip_address(ip)
@@ -1338,8 +1392,9 @@ if __name__ == '__main__':
         #   2. 拿不到 X-Forwarded-Proto，Flask 以为自己是 http，
         #      于是 url_for / request.url 生成的地址都是 http:// 开头
         #      （登录页跳转、静态资源、绝对 URL 都会受影响）。
-        # trusted_proxy_count=1 表示代理链上只有 Caddy 一跳，取 XFF 最后一段，
-        # 也就是 Caddy 追加的真实客户端 IP，客户端自己伪造的前几段不会被采信。
+        # trusted_proxy_count=1 表示只取 XFF 最后一段，也就是 Caddy 的直连对端。
+        # 如果前面还有 Cloudflare，这一段会是 CF 边缘节点 IP，get_client_ip
+        # 会再根据 CF-Connecting-IP 还原成用户真实 IP。
         try:
             serve(app, host=CONFIG['HOST'], port=CONFIG['PORT'], threads=8,
                   trusted_proxy='127.0.0.1',
