@@ -502,6 +502,12 @@
             overflow-y: auto;
         }
 
+        /* 24 小时独立 IP 表格不限高，全部地区都直接展开，避免被内部滚动条藏住 */
+        .table-wrap-full {
+            max-height: none;
+            overflow-y: visible;
+        }
+
         .loc-btn {
             padding: 3px 10px;
             font-size: 12px;
@@ -616,7 +622,7 @@
             </div>
 
             <div class="sub-block">
-                <h3 class="sub-title">最近 24 小时独立 IP（{{ unique_ips|length }} 个）</h3>
+                <h3 class="sub-title">最近 24 小时独立 IP（{{ unique_ips|length }} 个，按最近访问时间排序）</h3>
                 {% if unique_ips %}
                 <div class="filter-bar">
                     <button type="button" class="filter-btn active" data-filter="all">全部 ({{ unique_ip_24h }})</button>
@@ -624,7 +630,7 @@
                     <button type="button" class="filter-btn" data-filter="zj">浙江省 ({{ zhejiang_ip_24h }})</button>
                     <button type="button" class="filter-btn" data-filter="cn">全国 ({{ china_ip_24h }})</button>
                 </div>
-                <div class="table-wrap">
+                <div class="table-wrap table-wrap-full">
                     <table>
                         <thead>
                             <tr>

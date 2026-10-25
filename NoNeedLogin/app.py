@@ -610,8 +610,9 @@ def admin():
         })
     max_hourly = max((h['count'] for h in hourly), default=0)
 
-    # 最近 24 小时出现过的独立 IP（按访问次数排序）。上面的"独立 IP 数"就是
-    # 这张表的行数，两个数字从此可以对上。
+    # 最近 24 小时出现过的独立 IP（按最近访问时间由近到远排序）。上面的
+    # "独立 IP 数"就是这张表的行数，两个数字从此可以对上。任何地区筛选按钮
+    # 都保持这个时间顺序。
     # 归属地统一用 ip2region 离线库（data/ip2region_v4.xdb + v6.xdb）解析，
     # 纯内存查询，可以一次算完所有 IP；/admin/ip_location 的 ip-api.com
     # 查询方式仍然保留，页面上的「API 查询」按钮继续可用。
@@ -622,7 +623,7 @@ def admin():
            WHERE timestamp >= ?
              AND COALESCE(NULLIF(client_ip, ''), ip) <> ''
            GROUP BY COALESCE(NULLIF(client_ip, ''), ip)
-           ORDER BY c DESC""",
+           ORDER BY t DESC""",
         (day_ago,)
     ).fetchall()
     conn.close()

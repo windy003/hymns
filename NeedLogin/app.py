@@ -1105,7 +1105,8 @@ def admin_users():
         })
     max_hourly = max((h['count'] for h in hourly), default=0)
 
-    # 最近 24 小时出现过的独立 IP（按访问次数排序）。
+    # 最近 24 小时出现过的独立 IP（按最近访问时间由近到远排序）。
+    # 任何地区筛选按钮都保持这个时间顺序。
     # 归属地统一用 ip2region 离线库（data/ip2region_v4.xdb + v6.xdb）解析，
     # 纯内存查询，可以一次算完所有 IP；/admin/ip_location 的 ip-api.com
     # 查询方式仍然保留，页面上的「API 查询」按钮继续可用。
@@ -1122,7 +1123,7 @@ def admin_users():
            WHERE p.timestamp >= ?
              AND COALESCE(NULLIF(p.client_ip, ''), p.ip) <> ''
            GROUP BY COALESCE(NULLIF(p.client_ip, ''), p.ip)
-           ORDER BY c DESC""",
+           ORDER BY t DESC""",
         (day_ago,)
     ).fetchall()
 

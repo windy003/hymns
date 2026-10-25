@@ -190,8 +190,8 @@
         }
 
         .table-wrap {
-            max-height: 400px;
-            overflow-y: auto;
+            /* 不限制高度：全部 IP 都展开在页面上，避免后面的地区被内部滚动条藏起来 */
+            overflow-x: auto;
         }
 
         .loc-btn {
@@ -292,7 +292,7 @@
         </div>
 
         <div class="panel">
-            <h2>最近 24 小时独立 IP（共 {{ unique_ips | length }} 个，按访问次数排序）</h2>
+            <h2>最近 24 小时独立 IP（共 {{ unique_ips | length }} 个，按最近访问时间排序）</h2>
             {% if unique_ips %}
             <div class="filter-bar">
                 <button type="button" class="filter-btn active" data-filter="all">全部 ({{ unique_ip_24h }})</button>
