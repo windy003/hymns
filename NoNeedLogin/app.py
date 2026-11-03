@@ -80,7 +80,7 @@ def init_views_db():
             next_start_static INTEGER NOT NULL DEFAULT 0
         )
     ''')
-    # 管理页可在线修改的展示时长等配置。数据库里没有记录时回退到 .env。
+    # 网页后台可在线修改的展示时长等配置（唯一来源，不再读取 .env）。
     conn.execute('''
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
@@ -321,10 +321,12 @@ SWITCH_PAGE_PATH = Path(__file__).resolve().parent / 'index.html'
 AD_STATE = {'active': consume_next_start_mode(), 'changed_at': time.time()}
 AD_MODE_ENDPOINTS = {'index', 'play', 'view', 'stream', 'download'}
 
-# 管理页可以修改的展示时长配置。数据库中没有值时才回退到 .env。
+# 展示时长只保存在网页后台（views.db 的 app_settings 表），不再读取 .env。
 # 取值含义：正整数=秒数，留空=永久，0=该页不展示。
 SETTING_STATIC_LASTING = 'Static_Page_Lasting'
 SETTING_NORMAL_LASTING = 'No_Need_Login_Page_Lasting'
+DEFAULT_STATIC_SECONDS = 180   # 网页上从未保存过时使用的内置默认值
+DEFAULT_NORMAL_SECONDS = 600
 MAX_SWITCH_SECONDS = 7 * 24 * 3600
 
 _settings_cache = {}
@@ -333,7 +335,7 @@ _SETTINGS_CACHE_TTL = 2  # 秒；让管理页保存的值能快速被切换线�
 
 
 def parse_duration_seconds(expr):
-    """解析管理页/环境变量里的时长。
+    """解析网页后台填写的时长。
 
     返回 (是否合法, 秒数)：
     * 留空 → (True, None)，表示永久展示；
@@ -388,18 +390,13 @@ def save_settings(values):
 
 
 def get_switch_wait_seconds(key, default):
-    """读取展示时长，返回 None=永久、0=不展示、正整数=秒数。
+    """读取网页后台保存的展示时长，返回 None=永久、0=不展示、正整数=秒数。
 
-    优先级：/admin 保存的值 > .env > default。
+    网页上从未保存过时使用传入的默认值；不再读取 .env。
     """
     settings = load_settings()
     if key in settings:
         valid, seconds = parse_duration_seconds(settings[key])
-        if valid:
-            return seconds
-    env = os.getenv(key, '').strip()
-    if env:
-        valid, seconds = parse_duration_seconds(env)
         if valid:
             return seconds
     return default
@@ -421,8 +418,8 @@ def effective_phase_durations():
     任意一页设为 0 时，另一页就永久展示，它的时长值不再起作用
     （对应“0 表示没有，另一个填什么都表示永久”）。
     """
-    normal = get_switch_wait_seconds(SETTING_NORMAL_LASTING, 600)
-    static = get_switch_wait_seconds(SETTING_STATIC_LASTING, 180)
+    normal = get_switch_wait_seconds(SETTING_NORMAL_LASTING, DEFAULT_NORMAL_SECONDS)
+    static = get_switch_wait_seconds(SETTING_STATIC_LASTING, DEFAULT_STATIC_SECONDS)
     if static == 0 and normal != 0:
         normal = None
     elif normal == 0 and static != 0:
@@ -799,8 +796,8 @@ def admin():
                          hourly=hourly,
                          max_hourly=max_hourly,
                          unique_ips=unique_ips,
-                         ad_static_seconds=setting_display_value(SETTING_STATIC_LASTING, 180),
-                         ad_normal_seconds=setting_display_value(SETTING_NORMAL_LASTING, 600))
+                         ad_static_seconds=setting_display_value(SETTING_STATIC_LASTING, DEFAULT_STATIC_SECONDS),
+                         ad_normal_seconds=setting_display_value(SETTING_NORMAL_LASTING, DEFAULT_NORMAL_SECONDS))
 
 
 @app.route('/admin/ad-settings', methods=['POST'])

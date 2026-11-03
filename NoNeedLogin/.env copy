@@ -21,8 +21,5 @@ DEBUG=True
 # 管理员密码（用于访问 /admin 浏览量统计页面）
 ADMIN_PASSWORD=
 
-# 正常页面展示时长（秒，支持形如 60*10 的乘法表达式）
-No_Need_Login_Page_Lasting=60*10
-
-# 广告页展示时长（秒，支持形如 60*3 的乘法表达式）
-Static_Page_Lasting=60*3
+# 广告页 / 正常页面的展示时长不在这里配置，
+# 登录网页后台 /admin 在线设置即可（保存在 views.db 的 app_settings 表中）。
