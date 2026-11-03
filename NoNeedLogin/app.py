@@ -80,6 +80,13 @@ def init_views_db():
             next_start_static INTEGER NOT NULL DEFAULT 0
         )
     ''')
+    # 管理页可在线修改的展示时长等配置。数据库里没有记录时回退到 .env。
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -309,31 +316,98 @@ def lookup_ip_locations(ips):
 
 SWITCH_PAGE_PATH = Path(__file__).resolve().parent / 'index.html'
 
-AD_STATE = {'active': consume_next_start_mode()}
+# active=True 表示当前正在展示广告页（index.html），False 表示正常内容。
+# changed_at 记录当前这一轮开始的时刻，管理页据此计算剩余时间。
+AD_STATE = {'active': consume_next_start_mode(), 'changed_at': time.time()}
 AD_MODE_ENDPOINTS = {'index', 'play', 'view', 'stream', 'download'}
+
+# 管理页可以修改的时长配置（秒）。数据库中没有值时才回退到 .env。
+SETTING_STATIC_LASTING = 'Static_Page_Lasting'
+SETTING_NORMAL_LASTING = 'No_Need_Login_Page_Lasting'
+MAX_SWITCH_SECONDS = 7 * 24 * 3600
+
+_settings_cache = {}
+_settings_cache_at = 0.0
+_SETTINGS_CACHE_TTL = 2  # 秒；让管理页保存的值能快速被切换线程读到
+
+
+def parse_duration_seconds(expr):
+    """解析时长配置：正整数秒，或形如 `60*3` 的乘法表达式。非法/非正数返回 None。"""
+    expr = str(expr or '').strip()
+    if not re.fullmatch(r'\d+(\s*\*\s*\d+)*', expr):
+        return None
+    result = 1
+    for part in expr.split('*'):
+        result *= int(part.strip())
+    return result if result > 0 else None
+
+
+def load_settings():
+    """读取管理页保存的配置（带 2 秒缓存，避免切换线程每秒查库）。"""
+    global _settings_cache_at
+    now = time.time()
+    if now - _settings_cache_at < _SETTINGS_CACHE_TTL:
+        return _settings_cache
+    try:
+        conn = sqlite3.connect(str(VIEWS_DB_PATH), timeout=5)
+        rows = conn.execute('SELECT key, value FROM app_settings').fetchall()
+        conn.close()
+        _settings_cache.clear()
+        _settings_cache.update(dict(rows))
+        _settings_cache_at = now
+    except Exception:
+        pass
+    return _settings_cache
+
+
+def save_settings(values):
+    """把配置写入数据库，并让缓存立即失效，改动马上生效。"""
+    global _settings_cache_at
+    conn = sqlite3.connect(str(VIEWS_DB_PATH), timeout=30)
+    try:
+        with conn:
+            conn.executemany(
+                'INSERT INTO app_settings (key, value) VALUES (?, ?) '
+                'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+                list(values.items())
+            )
+    finally:
+        conn.close()
+    _settings_cache.update(values)
+    _settings_cache_at = 0.0
 
 
 def get_switch_wait_seconds(key, default):
-    """从环境变量读取形如 `KEY=60*3` 的时长配置（秒）"""
-    expr = os.getenv(key, '').strip()
-    if re.fullmatch(r'\d+(\s*\*\s*\d+)*', expr):
-        result = 1
-        for part in expr.split('*'):
-            result *= int(part.strip())
-        if result > 0:
-            return result
-    return default
+    """读取展示时长：管理页保存的值优先，其次 .env，最后用默认值。"""
+    seconds = parse_duration_seconds(load_settings().get(key))
+    if seconds:
+        return seconds
+    seconds = parse_duration_seconds(os.getenv(key, ''))
+    return seconds if seconds else default
+
+
+def current_phase_duration():
+    """当前正在展示的这一页应该停留多少秒。"""
+    if AD_STATE['active']:
+        return get_switch_wait_seconds(SETTING_STATIC_LASTING, 180)
+    return get_switch_wait_seconds(SETTING_NORMAL_LASTING, 600)
 
 
 def switch_loop():
-    """在“正常内容”和“广告页”之间定时切换"""
+    """在“正常内容”和“广告页”之间定时切换。
+
+    每秒重新计算一次本轮截止时间，所以管理页改完时长后：
+    * 调短：剩余时间随之缩短（已超时则马上切换）；
+    * 调长：本轮停留时间随之延长。
+    """
     while True:
-        if AD_STATE['active']:
-            time.sleep(get_switch_wait_seconds('Static_Page_Lasting', 180))
-            AD_STATE['active'] = False
-        else:
-            time.sleep(get_switch_wait_seconds('No_Need_Login_Page_Lasting', 600))
-            AD_STATE['active'] = True
+        deadline = AD_STATE['changed_at'] + current_phase_duration()
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            AD_STATE['active'] = not AD_STATE['active']
+            AD_STATE['changed_at'] = time.time()
+            continue
+        time.sleep(min(1.0, remaining))
 
 
 if SWITCH_PAGE_PATH.exists():
@@ -666,7 +740,50 @@ def admin():
                          total_all=total_all,
                          hourly=hourly,
                          max_hourly=max_hourly,
-                         unique_ips=unique_ips)
+                         unique_ips=unique_ips,
+                         ad_static_seconds=get_switch_wait_seconds(SETTING_STATIC_LASTING, 180),
+                         ad_normal_seconds=get_switch_wait_seconds(SETTING_NORMAL_LASTING, 600))
+
+
+@app.route('/admin/ad-settings', methods=['POST'])
+@admin_required
+def admin_ad_settings():
+    """保存广告页 / 正常页面的展示时长（管理页表单提交）"""
+    fields = (
+        ('normal_seconds', SETTING_NORMAL_LASTING, '正常页面展示时长'),
+        ('static_seconds', SETTING_STATIC_LASTING, '广告页展示时长'),
+    )
+    updates = {}
+    for form_key, setting_key, label in fields:
+        raw = request.form.get(form_key, '').strip()
+        seconds = parse_duration_seconds(raw)
+        if seconds is None:
+            flash(f'{label}必须是正整数秒，或形如 60*3 的乘法表达式', 'error')
+            return redirect(url_for('admin'))
+        if seconds > MAX_SWITCH_SECONDS:
+            flash(f'{label}不能超过 {MAX_SWITCH_SECONDS // 3600} 小时', 'error')
+            return redirect(url_for('admin'))
+        updates[setting_key] = str(seconds)
+
+    save_settings(updates)
+    flash('展示时长已保存，立即生效', 'success')
+    return redirect(url_for('admin'))
+
+
+@app.route('/admin/ad_state')
+@admin_required
+def admin_ad_state():
+    """管理页轮询：返回当前展示的是哪一页、本轮总时长和剩余秒数"""
+    active = AD_STATE['active']
+    duration = current_phase_duration()
+    remaining = max(0, int(round(duration - (time.time() - AD_STATE['changed_at']))))
+    return {
+        'active': active,
+        'duration': duration,
+        'remaining': remaining,
+        'static_seconds': get_switch_wait_seconds(SETTING_STATIC_LASTING, 180),
+        'normal_seconds': get_switch_wait_seconds(SETTING_NORMAL_LASTING, 600),
+    }
 
 
 @app.route('/admin/ip_location')

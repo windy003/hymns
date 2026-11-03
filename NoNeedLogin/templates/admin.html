@@ -20,6 +20,10 @@
             --accent-color: #667eea;
             --accent-hover: #5568d3;
             --accent-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --success-bg: #e7f6ec;
+            --success-text: #1e7e45;
+            --error-bg: #fdecea;
+            --error-text: #c0392b;
         }
 
         @media (prefers-color-scheme: dark) {
@@ -36,6 +40,10 @@
                 --shadow-color: rgba(0, 0, 0, 0.3);
                 --accent-color: #667eea;
                 --accent-hover: #7b8ff0;
+                --success-bg: #1e3d2b;
+                --success-text: #6fdc9a;
+                --error-bg: #4a2a2a;
+                --error-text: #ff8a80;
             }
         }
 
@@ -242,6 +250,89 @@
             border-color: transparent;
             color: white;
         }
+
+        .flash {
+            padding: 10px 14px;
+            border-radius: 6px;
+            font-size: 14px;
+            margin-bottom: 16px;
+        }
+
+        .flash-success {
+            background: var(--success-bg);
+            color: var(--success-text);
+        }
+
+        .flash-error {
+            background: var(--error-bg);
+            color: var(--error-text);
+        }
+
+        .ad-status {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+        }
+
+        .ad-status strong {
+            color: var(--accent-color);
+        }
+
+        .ad-status .remaining {
+            margin-left: 8px;
+            color: var(--text-muted);
+        }
+
+        .ad-form {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            align-items: flex-end;
+        }
+
+        .ad-form label {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .ad-form input {
+            width: 170px;
+            padding: 8px 10px;
+            border: 1px solid var(--border-color-light);
+            border-radius: 6px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 14px;
+        }
+
+        .ad-form input:focus {
+            outline: none;
+            border-color: var(--accent-color);
+        }
+
+        .ad-form button {
+            padding: 9px 20px;
+            border: none;
+            border-radius: 6px;
+            background: var(--accent-gradient);
+            color: white;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .ad-form button:hover {
+            opacity: 0.92;
+        }
+
+        .hint {
+            margin-top: 12px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
     </style>
 </head>
 <body>
@@ -251,6 +342,34 @@
     </div>
 
     <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                <div class="flash flash-{{ category or 'success' }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="panel">
+            <h2>广告页 / 正常页面 定时切换</h2>
+            <div class="ad-status">
+                当前展示：<strong id="adPhase">--</strong>
+                <span class="remaining" id="adRemaining"></span>
+            </div>
+            <form class="ad-form" method="post" action="{{ url_for('admin_ad_settings') }}">
+                <label>
+                    正常页面展示时长（秒）
+                    <input type="text" name="normal_seconds" value="{{ ad_normal_seconds }}" inputmode="numeric" required>
+                </label>
+                <label>
+                    广告页展示时长（秒）
+                    <input type="text" name="static_seconds" value="{{ ad_static_seconds }}" inputmode="numeric" required>
+                </label>
+                <button type="submit">保存</button>
+            </form>
+            <p class="hint">支持 60*10 这样的乘法写法；保存后立即生效，正在进行的这一轮会按新时长重新计算剩余时间。</p>
+        </div>
+
         <div class="stats-row">
             <div class="stat-card">
                 <div class="value">{{ total_24h }}</div>
@@ -393,6 +512,30 @@
                     applyFilter(btn.dataset.filter);
                 });
             });
+        })();
+
+        // 每秒刷新一次“当前展示哪一页 / 还剩多少秒”，方便确认时长改动已经生效。
+        (function () {
+            var phaseEl = document.getElementById('adPhase');
+            var remainingEl = document.getElementById('adRemaining');
+            if (!phaseEl || !remainingEl) return;
+
+            function tick() {
+                fetch('/admin/ad_state')
+                    .then(function (res) { return res.json(); })
+                    .then(function (data) {
+                        phaseEl.textContent = data.active ? '广告页' : '正常页面';
+                        remainingEl.textContent = '还剩 ' + data.remaining + ' 秒切换到' +
+                            (data.active ? '正常页面' : '广告页') +
+                            '（本轮共 ' + data.duration + ' 秒）';
+                    })
+                    .catch(function () {
+                        remainingEl.textContent = '状态获取失败';
+                    });
+            }
+
+            tick();
+            setInterval(tick, 1000);
         })();
     </script>
 </body>
