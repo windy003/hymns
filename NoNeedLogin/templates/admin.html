@@ -359,15 +359,20 @@
             <form class="ad-form" method="post" action="{{ url_for('admin_ad_settings') }}">
                 <label>
                     正常页面展示时长（秒）
-                    <input type="text" name="normal_seconds" value="{{ ad_normal_seconds }}" inputmode="numeric" required>
+                    <input type="text" name="normal_seconds" value="{{ ad_normal_seconds }}"
+                           placeholder="留空 = 永久；0 = 不展示" inputmode="numeric">
                 </label>
                 <label>
                     广告页展示时长（秒）
-                    <input type="text" name="static_seconds" value="{{ ad_static_seconds }}" inputmode="numeric" required>
+                    <input type="text" name="static_seconds" value="{{ ad_static_seconds }}"
+                           placeholder="留空 = 永久；0 = 不展示" inputmode="numeric">
                 </label>
                 <button type="submit">保存</button>
             </form>
-            <p class="hint">支持 60*10 这样的乘法写法；保存后立即生效，正在进行的这一轮会按新时长重新计算剩余时间。</p>
+            <p class="hint">
+                单位是秒，支持 60*10 这样的乘法写法；留空表示永久展示，0 表示该页面不展示
+                （这时另一页会永久展示，它的时长填什么都一样）。保存后本轮从现在开始重新计时。
+            </p>
         </div>
 
         <div class="stats-row">
@@ -524,10 +529,16 @@
                 fetch('/admin/ad_state')
                     .then(function (res) { return res.json(); })
                     .then(function (data) {
+                        var next = data.active ? '正常页面' : '广告页';
                         phaseEl.textContent = data.active ? '广告页' : '正常页面';
-                        remainingEl.textContent = '还剩 ' + data.remaining + ' 秒切换到' +
-                            (data.active ? '正常页面' : '广告页') +
-                            '（本轮共 ' + data.duration + ' 秒）';
+                        if (data.duration === null) {
+                            remainingEl.textContent = '永久展示，不会自动切换';
+                        } else if (data.duration === 0) {
+                            remainingEl.textContent = '已设置为 0（不展示），即将切换到' + next;
+                        } else {
+                            remainingEl.textContent = '还剩 ' + data.remaining + ' 秒切换到' + next +
+                                '（本轮共 ' + data.duration + ' 秒）';
+                        }
                     })
                     .catch(function () {
                         remainingEl.textContent = '状态获取失败';

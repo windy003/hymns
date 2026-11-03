@@ -321,7 +321,8 @@ SWITCH_PAGE_PATH = Path(__file__).resolve().parent / 'index.html'
 AD_STATE = {'active': consume_next_start_mode(), 'changed_at': time.time()}
 AD_MODE_ENDPOINTS = {'index', 'play', 'view', 'stream', 'download'}
 
-# 管理页可以修改的时长配置（秒）。数据库中没有值时才回退到 .env。
+# 管理页可以修改的展示时长配置。数据库中没有值时才回退到 .env。
+# 取值含义：正整数=秒数，留空=永久，0=该页不展示。
 SETTING_STATIC_LASTING = 'Static_Page_Lasting'
 SETTING_NORMAL_LASTING = 'No_Need_Login_Page_Lasting'
 MAX_SWITCH_SECONDS = 7 * 24 * 3600
@@ -332,14 +333,23 @@ _SETTINGS_CACHE_TTL = 2  # 秒；让管理页保存的值能快速被切换线�
 
 
 def parse_duration_seconds(expr):
-    """解析时长配置：正整数秒，或形如 `60*3` 的乘法表达式。非法/非正数返回 None。"""
-    expr = str(expr or '').strip()
-    if not re.fullmatch(r'\d+(\s*\*\s*\d+)*', expr):
-        return None
+    """解析管理页/环境变量里的时长。
+
+    返回 (是否合法, 秒数)：
+    * 留空 → (True, None)，表示永久展示；
+    * `0` → (True, 0)，表示这一页不展示；
+    * 正整数或形如 `60*3` 的乘法表达式 → (True, 秒数)；
+    * 其它内容 → (False, None)。
+    """
+    text = str(expr if expr is not None else '').strip()
+    if text == '':
+        return True, None
+    if not re.fullmatch(r'\d+(\s*\*\s*\d+)*', text):
+        return False, None
     result = 1
-    for part in expr.split('*'):
+    for part in text.split('*'):
         result *= int(part.strip())
-    return result if result > 0 else None
+    return True, result
 
 
 def load_settings():
@@ -378,30 +388,78 @@ def save_settings(values):
 
 
 def get_switch_wait_seconds(key, default):
-    """读取展示时长：管理页保存的值优先，其次 .env，最后用默认值。"""
-    seconds = parse_duration_seconds(load_settings().get(key))
-    if seconds:
-        return seconds
-    seconds = parse_duration_seconds(os.getenv(key, ''))
-    return seconds if seconds else default
+    """读取展示时长，返回 None=永久、0=不展示、正整数=秒数。
+
+    优先级：/admin 保存的值 > .env > default。
+    """
+    settings = load_settings()
+    if key in settings:
+        valid, seconds = parse_duration_seconds(settings[key])
+        if valid:
+            return seconds
+    env = os.getenv(key, '').strip()
+    if env:
+        valid, seconds = parse_duration_seconds(env)
+        if valid:
+            return seconds
+    return default
+
+
+def setting_display_value(key, default):
+    """管理页输入框显示的内容：永久显示为空白，其余显示秒数。"""
+    settings = load_settings()
+    if key in settings:
+        return settings[key]
+    seconds = get_switch_wait_seconds(key, default)
+    return '' if seconds is None else str(seconds)
+
+
+def effective_phase_durations():
+    """返回 (正常页面, 广告页) 的实际时长。
+
+    None 表示永久，0 表示不展示，正整数表示秒数。
+    任意一页设为 0 时，另一页就永久展示，它的时长值不再起作用
+    （对应“0 表示没有，另一个填什么都表示永久”）。
+    """
+    normal = get_switch_wait_seconds(SETTING_NORMAL_LASTING, 600)
+    static = get_switch_wait_seconds(SETTING_STATIC_LASTING, 180)
+    if static == 0 and normal != 0:
+        normal = None
+    elif normal == 0 and static != 0:
+        static = None
+    return normal, static
 
 
 def current_phase_duration():
-    """当前正在展示的这一页应该停留多少秒。"""
-    if AD_STATE['active']:
-        return get_switch_wait_seconds(SETTING_STATIC_LASTING, 180)
-    return get_switch_wait_seconds(SETTING_NORMAL_LASTING, 600)
+    """当前正在展示的这一页应该停留多少秒（None=永久，0=不展示）。"""
+    normal, static = effective_phase_durations()
+    return static if AD_STATE['active'] else normal
 
 
 def switch_loop():
     """在“正常内容”和“广告页”之间定时切换。
 
-    每秒重新计算一次本轮截止时间，所以管理页改完时长后：
-    * 调短：剩余时间随之缩短（已超时则马上切换）；
-    * 调长：本轮停留时间随之延长。
+    每秒重新计算一次，所以管理页改完时长后很快生效：
+    改成永久就停在当前页；某一页设为 0 就跳过该页。
     """
     while True:
-        deadline = AD_STATE['changed_at'] + current_phase_duration()
+        duration = current_phase_duration()
+        if duration is None:
+            # 永久展示：保持当前页，但仍每秒检查一次设置是否变化
+            time.sleep(1)
+            continue
+        if duration <= 0:
+            # 当前页设置为 0（不展示）：立即换到另一页。
+            # 两页都为 0 是无效配置，原地停留，避免来回闪烁。
+            normal, static = effective_phase_durations()
+            other = normal if AD_STATE['active'] else static
+            if other is None or other > 0:
+                AD_STATE['active'] = not AD_STATE['active']
+                AD_STATE['changed_at'] = time.time()
+            else:
+                time.sleep(1)
+            continue
+        deadline = AD_STATE['changed_at'] + duration
         remaining = deadline - time.time()
         if remaining <= 0:
             AD_STATE['active'] = not AD_STATE['active']
@@ -741,8 +799,8 @@ def admin():
                          hourly=hourly,
                          max_hourly=max_hourly,
                          unique_ips=unique_ips,
-                         ad_static_seconds=get_switch_wait_seconds(SETTING_STATIC_LASTING, 180),
-                         ad_normal_seconds=get_switch_wait_seconds(SETTING_NORMAL_LASTING, 600))
+                         ad_static_seconds=setting_display_value(SETTING_STATIC_LASTING, 180),
+                         ad_normal_seconds=setting_display_value(SETTING_NORMAL_LASTING, 600))
 
 
 @app.route('/admin/ad-settings', methods=['POST'])
@@ -754,18 +812,27 @@ def admin_ad_settings():
         ('static_seconds', SETTING_STATIC_LASTING, '广告页展示时长'),
     )
     updates = {}
+    parsed = {}
     for form_key, setting_key, label in fields:
         raw = request.form.get(form_key, '').strip()
-        seconds = parse_duration_seconds(raw)
-        if seconds is None:
-            flash(f'{label}必须是正整数秒，或形如 60*3 的乘法表达式', 'error')
+        valid, seconds = parse_duration_seconds(raw)
+        if not valid:
+            flash(f'{label}只能填 0、正整数秒（或 60*3 这样的乘法），留空表示永久', 'error')
             return redirect(url_for('admin'))
-        if seconds > MAX_SWITCH_SECONDS:
+        if seconds is not None and seconds > MAX_SWITCH_SECONDS:
             flash(f'{label}不能超过 {MAX_SWITCH_SECONDS // 3600} 小时', 'error')
             return redirect(url_for('admin'))
-        updates[setting_key] = str(seconds)
+        # 留空存空串（永久），0 存 "0"（该页不展示）
+        updates[setting_key] = '' if seconds is None else str(seconds)
+        parsed[setting_key] = seconds
+
+    if parsed[SETTING_NORMAL_LASTING] == 0 and parsed[SETTING_STATIC_LASTING] == 0:
+        flash('两个时长不能同时为 0，否则没有任何页面可展示', 'error')
+        return redirect(url_for('admin'))
 
     save_settings(updates)
+    # 保存后本轮从现在开始按新设置计时，避免“永久”改回有限时长时立刻切换
+    AD_STATE['changed_at'] = time.time()
     flash('展示时长已保存，立即生效', 'success')
     return redirect(url_for('admin'))
 
@@ -776,13 +843,14 @@ def admin_ad_state():
     """管理页轮询：返回当前展示的是哪一页、本轮总时长和剩余秒数"""
     active = AD_STATE['active']
     duration = current_phase_duration()
-    remaining = max(0, int(round(duration - (time.time() - AD_STATE['changed_at']))))
+    if duration is None:
+        remaining = None
+    else:
+        remaining = max(0, int(round(duration - (time.time() - AD_STATE['changed_at']))))
     return {
         'active': active,
         'duration': duration,
         'remaining': remaining,
-        'static_seconds': get_switch_wait_seconds(SETTING_STATIC_LASTING, 180),
-        'normal_seconds': get_switch_wait_seconds(SETTING_NORMAL_LASTING, 600),
     }
 
 
