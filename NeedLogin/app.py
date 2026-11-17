@@ -108,13 +108,6 @@ def init_db():
         last_active TEXT NOT NULL
     )''')
 
-    db.execute('''CREATE TABLE IF NOT EXISTS phone_accounts (
-        phone TEXT PRIMARY KEY,
-        is_approved INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL,
-        approved_at TEXT
-    )''')
-
     # 浏览量统计表（记录浏览动作的路径、来访 IP、登录名、时间戳）
     db.execute('''CREATE TABLE IF NOT EXISTS page_views (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -251,13 +244,11 @@ def login_required(f):
 
 
 def admin_required(f):
-    """管理员验证装饰器"""
+    """管理员验证装饰器：未登录或非管理员时跳转到独立的管理员登录页"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not session.get('logged_in'):
-            return redirect(url_for('login'))
-        if not session.get('is_admin'):
-            abort(403)
+        if not session.get('logged_in') or not session.get('is_admin'):
+            return redirect(url_for('admin_login'))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -266,7 +257,7 @@ def admin_required(f):
 def validate_session():
     """在每个请求前验证当前会话是否仍有效（未被踢出）"""
     # 跳过不需要会话验证的端点
-    if request.endpoint in ('login', 'stream', 'static'):
+    if request.endpoint in ('login', 'admin_login', 'stream', 'static'):
         return
 
     if session.get('logged_in') and session.get('session_token'):
@@ -541,64 +532,63 @@ def finish_login(db, username, is_admin, max_devices):
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    """登录页面"""
-    active_method = 'phone'
-    if request.method == 'POST':
-        db = get_db()
-        method = request.form.get('auth_method', 'password')
-        if method == 'phone':
-            active_method = 'phone'
-            phone = request.form.get('phone', '').strip()
-            code = request.form.get('verify_code', '').strip()
-            if not re.fullmatch(r'1[3-9]\d{9}', phone) or not re.fullmatch(r'\d{4,8}', code):
-                flash('请输入有效手机号和短信验证码', 'error')
-            else:
-                approved = db.execute(
-                    'SELECT is_approved FROM phone_accounts WHERE phone = ?', (phone,)
-                ).fetchone()
-                if not approved or not approved['is_approved']:
-                    flash('此手机号未启用短信登录', 'error')
-                else:
-                    try:
-                        if verify_phone_code(phone, code):
-                            still_approved = db.execute(
-                                'SELECT is_approved FROM phone_accounts WHERE phone = ?', (phone,)
-                            ).fetchone()
-                            if still_approved and still_approved['is_approved']:
-                                finish_login(db, f'sms_{phone}', False, 1)
-                                return redirect(url_for('index'))
-                            flash('此手机号的登录权限已停用', 'error')
-                        else:
-                            flash('短信验证码错误或已过期', 'error')
-                    except Exception as error:
-                        if 'isv.ValidateFail' in str(error):
-                            flash('验证码错误、已过期或已被新验证码覆盖，请重新获取并输入最新验证码', 'error')
-                        else:
-                            app.logger.exception('Aliyun SMS verification failed')
-                            flash('短信验证码核验暂时不可用，请稍后再试', 'error')
-        else:
-            active_method = 'password'
-            username = request.form.get('username', '').strip()
-            password = request.form.get('password', '')
-            user = db.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
-            valid_password = False
-            if user:
-                stored_password = user['password']
-                try:
-                    valid_password = check_password_hash(stored_password, password)
-                except (ValueError, TypeError):
-                    valid_password = secrets.compare_digest(stored_password, password)
-                    if valid_password:
-                        db.execute('UPDATE users SET password = ? WHERE id = ?',
-                                   (generate_password_hash(password), user['id']))
-                        db.commit()
+    """登录页面：只提供手机号短信验证码登录，验证通过后即可浏览"""
+    if session.get('logged_in'):
+        return redirect(url_for('admin_users' if session.get('is_admin') else 'index'))
 
-            if user and valid_password:
-                finish_login(db, username, user['is_admin'], user['max_devices'])
-                return redirect(url_for('index'))
+    if request.method == 'POST':
+        phone = request.form.get('phone', '').strip()
+        code = request.form.get('verify_code', '').strip()
+        if not re.fullmatch(r'1[3-9]\d{9}', phone) or not re.fullmatch(r'\d{4,8}', code):
+            flash('请输入有效手机号和短信验证码', 'error')
+        else:
+            try:
+                if verify_phone_code(phone, code):
+                    finish_login(get_db(), f'sms_{phone}', False, 1)
+                    return redirect(url_for('index'))
+                flash('短信验证码错误或已过期', 'error')
+            except Exception as error:
+                if 'isv.ValidateFail' in str(error):
+                    flash('验证码错误、已过期或已被新验证码覆盖，请重新获取并输入最新验证码', 'error')
+                else:
+                    app.logger.exception('Aliyun SMS verification failed')
+                    flash('短信验证码核验暂时不可用，请稍后再试', 'error')
+
+    return render_template('login.html')
+
+
+@app.route('/admin/login', methods=['GET', 'POST'])
+def admin_login():
+    """管理员登录页：使用用户名和密码，仅管理员账号可登录"""
+    if session.get('logged_in') and session.get('is_admin'):
+        return redirect(url_for('admin_users'))
+
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+        db = get_db()
+        user = db.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+        valid_password = False
+        if user:
+            stored_password = user['password']
+            try:
+                valid_password = check_password_hash(stored_password, password)
+            except (ValueError, TypeError):
+                valid_password = secrets.compare_digest(stored_password, password)
+                if valid_password:
+                    db.execute('UPDATE users SET password = ? WHERE id = ?',
+                               (generate_password_hash(password), user['id']))
+                    db.commit()
+
+        if user and valid_password and user['is_admin']:
+            finish_login(db, username, user['is_admin'], user['max_devices'])
+            return redirect(url_for('admin_users'))
+        if user and valid_password:
+            flash('该账号不是管理员，请使用手机号登录', 'error')
+        else:
             flash('用户名或密码错误', 'error')
 
-    return render_template('login.html', active_method=active_method)
+    return render_template('admin_login.html')
 
 
 @app.route('/login/send-code', methods=['POST'])
@@ -606,11 +596,6 @@ def login_send_code():
     phone = request.form.get('phone', '').strip()
     if not re.fullmatch(r'1[3-9]\d{9}', phone):
         return jsonify(success=False, message='请输入有效的手机号'), 400
-    approved = get_db().execute(
-        'SELECT is_approved FROM phone_accounts WHERE phone = ?', (phone,)
-    ).fetchone()
-    if not approved or not approved['is_approved']:
-        return jsonify(success=False, message='此手机号未启用短信登录'), 403
     try:
         send_phone_code(phone)
         return jsonify(success=True, message='验证码已发送')
@@ -622,12 +607,13 @@ def login_send_code():
 @app.route('/logout')
 def logout():
     """登出"""
+    was_admin = session.get('is_admin')
     session_token = session.get('session_token')
     if session_token:
         db = get_db()
         deactivate_session(db, session_token)
     session.clear()
-    return redirect(url_for('login'))
+    return redirect(url_for('admin_login' if was_admin else 'login'))
 
 
 @app.route('/api/get_stream_token')
@@ -1061,17 +1047,10 @@ def admin_users():
     users = db.execute(
         'SELECT id, username, is_admin, max_devices, created_at FROM users ORDER BY id'
     ).fetchall()
-    phone_accounts = db.execute(
-        'SELECT phone, is_approved, created_at, approved_at FROM phone_accounts ORDER BY created_at DESC'
-    ).fetchall()
     # 获取每个用户的活跃设备数
     user_sessions = {}
     for user in users:
         user_sessions[user['username']] = get_active_session_count(db, user['username'])
-    phone_sessions = {
-        row['phone']: get_active_session_count(db, f"sms_{row['phone']}")
-        for row in phone_accounts
-    }
 
     # ---- 最近 24 小时浏览量统计 ----
     now = time.time()
@@ -1172,7 +1151,6 @@ def admin_users():
     } for row in recent_rows]
 
     return render_template('admin_users.html', users=users, user_sessions=user_sessions,
-                           phone_accounts=phone_accounts, phone_sessions=phone_sessions,
                            total_24h=total_24h, unique_ip_24h=unique_ip_24h,
                            hangzhou_ip_24h=hangzhou_ip_24h,
                            zhejiang_ip_24h=zhejiang_ip_24h,
@@ -1189,104 +1167,6 @@ def admin_ip_location():
     if not ip:
         return {'location': ''}, 400
     return {'location': lookup_ip_locations([ip]).get(ip, '未知')}
-
-
-@app.route('/admin/phone-accounts/add', methods=['POST'])
-@admin_required
-def admin_add_phone_account():
-    phone = request.form.get('phone', '').strip()
-    if not re.fullmatch(r'1[3-9]\d{9}', phone):
-        flash('请输入有效的手机号', 'error')
-        return redirect(url_for('admin_users'))
-    db = get_db()
-    now = datetime.now().isoformat()
-    existing = db.execute(
-        'SELECT is_approved FROM phone_accounts WHERE phone = ?', (phone,)
-    ).fetchone()
-    if existing:
-        db.execute(
-            'UPDATE phone_accounts SET is_approved = 1, approved_at = ? WHERE phone = ?',
-            (now, phone)
-        )
-        flash(f'手机号 {phone} 已启用短信登录', 'success')
-    else:
-        db.execute(
-            'INSERT INTO phone_accounts (phone, is_approved, created_at, approved_at) '
-            'VALUES (?, 1, ?, ?)', (phone, now, now)
-        )
-        flash(f'手机号 {phone} 已添加并立即启用短信登录', 'success')
-    db.commit()
-    return redirect(url_for('admin_users'))
-
-
-@app.route('/admin/phone-accounts/<action>', methods=['POST'])
-@admin_required
-def admin_update_phone_account(action):
-    phone = request.form.get('phone', '').strip()
-    if action not in ('enable', 'revoke'):
-        abort(404)
-    db = get_db()
-    account = db.execute('SELECT phone FROM phone_accounts WHERE phone = ?', (phone,)).fetchone()
-    if not account:
-        flash('手机号不存在', 'error')
-    elif action == 'enable':
-        db.execute('UPDATE phone_accounts SET is_approved = 1, approved_at = ? WHERE phone = ?',
-                   (datetime.now().isoformat(), phone))
-        db.commit()
-        flash(f'手机号 {phone} 已启用短信登录', 'success')
-    else:
-        db.execute('UPDATE phone_accounts SET is_approved = 0 WHERE phone = ?', (phone,))
-        db.execute('UPDATE sessions SET is_active = 0 WHERE username = ?', (f'sms_{phone}',))
-        db.commit()
-        flash(f'手机号 {phone} 的登录权限已撤销', 'success')
-    return redirect(url_for('admin_users'))
-
-
-@app.route('/admin/phone-accounts/delete', methods=['POST'])
-@admin_required
-def admin_delete_phone_account():
-    phone = request.form.get('phone', '').strip()
-    db = get_db()
-    account = db.execute(
-        'SELECT phone FROM phone_accounts WHERE phone = ?', (phone,)
-    ).fetchone()
-    if not account:
-        flash('手机号不存在', 'error')
-        return redirect(url_for('admin_users'))
-
-    db.execute('DELETE FROM phone_accounts WHERE phone = ?', (phone,))
-    db.execute('DELETE FROM sessions WHERE username = ?', (f'sms_{phone}',))
-    db.commit()
-    flash(f'手机号 {phone} 的登录账号和会话已删除', 'success')
-    return redirect(url_for('admin_users'))
-
-
-@app.route('/admin/users/add', methods=['POST'])
-@admin_required
-def admin_add_user():
-    """添加用户"""
-    username = request.form.get('username', '').strip()
-    password = request.form.get('password', '')
-
-    if not username or not password:
-        flash('用户名和密码不能为空', 'error')
-        return redirect(url_for('admin_users'))
-
-    if len(password) < 6:
-        flash('密码长度不能少于6位', 'error')
-        return redirect(url_for('admin_users'))
-
-    db = get_db()
-    existing = db.execute('SELECT id FROM users WHERE username = ?', (username,)).fetchone()
-    if existing:
-        flash(f'用户名 {username} 已存在', 'error')
-        return redirect(url_for('admin_users'))
-
-    db.execute('INSERT INTO users (username, password, is_admin, created_at) VALUES (?, ?, 0, ?)',
-               (username, generate_password_hash(password), datetime.now().isoformat()))
-    db.commit()
-    flash(f'用户 {username} 创建成功', 'success')
-    return redirect(url_for('admin_users'))
 
 
 @app.route('/admin/users/delete', methods=['POST'])

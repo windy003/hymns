@@ -4,14 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>登录 - 赞美诗</title>
-    
+
     <link rel="apple-touch-icon" sizes="2048x2048" href="{{ url_for('static', filename='2048x2048.png',v='1') }}">
     <link rel="icon" type="image/png" href="{{ url_for('static', filename='2048x2048.png',v='1') }}">
     <link rel="apple-touch-icon" sizes="2048x2048" href="{{ url_for('static', filename='2048x2048.png') }}">
     <link rel="icon" type="image/png" href="{{ url_for('static', filename='2048x2048.png') }}">
-    
-    
-    
+
     <style>
         /* 主题颜色变量定义 */
         :root {
@@ -87,7 +85,6 @@
         }
 
         input[type="text"],
-        input[type="password"],
         input[type="tel"],
         input[type="number"] {
             width: 100%;
@@ -101,7 +98,6 @@
         }
 
         input[type="text"]:focus,
-        input[type="password"]:focus,
         input[type="tel"]:focus,
         input[type="number"]:focus {
             outline: none;
@@ -151,19 +147,9 @@
             margin: 5px 0;
         }
 
-        .highlight {
-            background: var(--highlight-bg);
-            border: 1px solid var(--highlight-border);
-            color: var(--highlight-text);
-        }
-
-        .login-tabs { display: flex; gap: 8px; margin-bottom: 22px; }
-        .login-tabs button { flex: 1; padding: 10px; border: 1px solid var(--border-color); border-radius: 5px; background: var(--info-bg); color: var(--text-secondary); font-size: 15px; cursor: pointer; }
-        .login-tabs button.active { background: var(--accent-gradient); color: white; border-color: transparent; }
         .code-row { display: flex; gap: 8px; }
         .code-row input { min-width: 0; flex: 1; }
         .btn-code { flex-shrink: 0; border: 0; border-radius: 5px; padding: 0 12px; color: white; background: var(--accent-color); cursor: pointer; }
-        .auth-panel[hidden] { display: none; }
         #sms-status { margin-top: 8px; font-size: 13px; color: var(--text-muted); }
     </style>
 </head>
@@ -179,31 +165,10 @@
             {% endif %}
         {% endwith %}
 
-        <div class="login-tabs" role="tablist" aria-label="登录方式">
-            <button type="button" class="{{ 'active' if active_method == 'phone' }}" id="phoneTab" role="tab" aria-selected="{{ 'true' if active_method == 'phone' else 'false' }}">短信登录</button>
-            <button type="button" class="{{ 'active' if active_method != 'phone' }}" id="passwordTab" role="tab" aria-selected="{{ 'true' if active_method != 'phone' else 'false' }}">用户名密码</button>
-        </div>
-
-        <form method="POST" class="auth-panel" id="passwordPanel" {{ 'hidden' if active_method == 'phone' }}>
-            <input type="hidden" name="auth_method" value="password">
-            <div class="form-group">
-                <label for="username">用户名</label>
-                <input type="text" id="username" name="username" required {{ 'autofocus' if active_method != 'phone' }}>
-            </div>
-
-            <div class="form-group">
-                <label for="password">密码</label>
-                <input type="password" id="password" name="password" required>
-            </div>
-
-            <button type="submit" class="btn-login">登录</button>
-        </form>
-
-        <form method="POST" class="auth-panel" id="phonePanel" {{ 'hidden' if active_method != 'phone' }}>
-            <input type="hidden" name="auth_method" value="phone">
+        <form method="POST">
             <div class="form-group">
                 <label for="phone">手机号</label>
-                <input type="tel" id="phone" name="phone" inputmode="numeric" autocomplete="tel" pattern="1[3-9][0-9]{9}" maxlength="11" placeholder="手机号" required {{ 'autofocus' if active_method == 'phone' }}>
+                <input type="tel" id="phone" name="phone" inputmode="numeric" autocomplete="tel" pattern="1[3-9][0-9]{9}" maxlength="11" placeholder="手机号" required autofocus>
             </div>
             <div class="form-group">
                 <label for="verify_code">短信验证码</label>
@@ -213,31 +178,14 @@
                 </div>
                 <div id="sms-status" aria-live="polite"></div>
             </div>
-            <button type="submit" class="btn-login">短信登录</button>
+            <button type="submit" class="btn-login">登录</button>
         </form>
 
-        <div class="info highlight">
-            <p>手机号登录,也要向站长:周秋良,付款100元,设置批准同意才可以，微信号：'trust030703'</p>
+        <div class="info">
+            <p>请使用手机号获取短信验证码登录，登录后即可浏览。</p>
         </div>
-
     </div>
     <script>
-        const passwordTab = document.getElementById('passwordTab');
-        const phoneTab = document.getElementById('phoneTab');
-        const passwordPanel = document.getElementById('passwordPanel');
-        const phonePanel = document.getElementById('phonePanel');
-        function selectLogin(method) {
-            const isPhone = method === 'phone';
-            passwordPanel.hidden = isPhone;
-            phonePanel.hidden = !isPhone;
-            passwordTab.classList.toggle('active', !isPhone);
-            phoneTab.classList.toggle('active', isPhone);
-            passwordTab.setAttribute('aria-selected', String(!isPhone));
-            phoneTab.setAttribute('aria-selected', String(isPhone));
-        }
-        passwordTab.addEventListener('click', () => selectLogin('password'));
-        phoneTab.addEventListener('click', () => selectLogin('phone'));
-
         const sendButton = document.getElementById('sendCodeButton');
         sendButton.addEventListener('click', async () => {
             const phone = document.getElementById('phone').value.trim();
